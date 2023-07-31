@@ -1,0 +1,19 @@
+results/*
+logs/
+baseline_models/wandb/*
+__pycache__/
+.idea/*
+
+# Builds
+*.apk
+*.unitypackage
+*.app
+*.exe
+*.x86_64
+*.x86
+segment_anything/checkpoints/*
+
+__pycache__/
+*.pyc
+*.vscode
+*.pytest_cache/
