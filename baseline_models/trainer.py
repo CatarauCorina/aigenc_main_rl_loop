@@ -9,7 +9,6 @@ import random
 import gym
 # from create.create_game import register_json_folder, register_json_str
 # import torchvision.transforms as transforms
-from create.create_game.settings import CreateGameSettings
 import matplotlib.pyplot as plt
 
 
@@ -34,11 +33,21 @@ if not IS_SERVER:
     from baseline_models.conv_dqn import DQN
     from baseline_models.hybrid_action_conv_dqn import HybridDQNMultiHead
     from baseline_models.masked_actions import CategoricalMasked
+    import os, sys
+    folder_path = os.path.abspath('create')
+    sys.path.append(folder_path)
+    from create.create_game.settings import CreateGameSettings
+
 else:
     from logger import Logger
     from conv_dqn import DQN
     from hybrid_action_conv_dqn import HybridDQNMultiHead
     from masked_actions import CategoricalMasked
+    import os, sys
+
+    folder_path = os.path.abspath('create')
+    sys.path.append(folder_path)
+    from create.create_game.settings import CreateGameSettings
 
 
 envs_to_run = []
