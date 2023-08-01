@@ -27,7 +27,7 @@ import torch.optim as optim
 from torchvision.utils import make_grid
 import torch.nn.functional as F
 import torchvision.transforms as T
-IS_SERVER = True
+IS_SERVER = False
 if not IS_SERVER:
     from baseline_models.logger import Logger
     from baseline_models.conv_dqn import DQN
