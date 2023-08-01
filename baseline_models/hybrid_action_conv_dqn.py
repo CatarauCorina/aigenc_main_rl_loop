@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
 import numpy as np
-IS_SERVER = True
+IS_SERVER = False
 if not IS_SERVER:
     from baseline_models.masked_actions import CategoricalMasked
 else:
