@@ -45,7 +45,7 @@ else:
     from hybrid_action_conv_dqn import HybridDQNMultiHead
     from masked_actions import CategoricalMasked
     import os, sys
-
+    print(os.getcwd())
     folder_path = os.path.abspath('create')
     sys.path.append(folder_path)
     import create
