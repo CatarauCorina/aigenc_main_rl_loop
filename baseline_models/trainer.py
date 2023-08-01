@@ -129,6 +129,14 @@ class TrainModel(object):
                 target_net.load_state_dict(policy_net.state_dict())
             if i_episode % 1000 == 0 and i_episode != 0:
                 self.evaluate(target_net, writer, i_episode)
+            if i_episode % 3000 == 0 and i_episode!=0:
+                PATH = f"model_{i_episode}_{loss_ep}.pt"
+                torch.save({
+                    'epoch': i_episode,
+                    'model_state_dict': policy_net.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': loss_ep,
+                }, PATH)
         return
 
     def init_model(self, actions=0):
