@@ -48,8 +48,7 @@ else:
     print(os.getcwd())
     folder_path = os.path.abspath('create')
     sys.path.append(folder_path)
-    import create
-    from create.create_game.settings import CreateGameSettings
+    from ..create.create_game.settings import CreateGameSettings
 
 
 envs_to_run = []
