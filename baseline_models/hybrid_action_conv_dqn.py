@@ -4,7 +4,11 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
 import numpy as np
-from baseline_models.masked_actions import CategoricalMasked
+IS_SERVER = True
+if not IS_SERVER:
+    from baseline_models.masked_actions import CategoricalMasked
+else:
+    from masked_actions import CategoricalMasked
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
