@@ -4,7 +4,6 @@
 # import glob
 # import cv2
 # from create.create_game.tools.tool_factory import *
-from baseline_models.masked_actions import CategoricalMasked
 
 import random
 import gym
@@ -34,10 +33,12 @@ if not IS_SERVER:
     from baseline_models.logger import Logger
     from baseline_models.conv_dqn import DQN
     from baseline_models.hybrid_action_conv_dqn import HybridDQNMultiHead
+    from baseline_models.masked_actions import CategoricalMasked
 else:
     from logger import Logger
     from conv_dqn import DQN
     from hybrid_action_conv_dqn import HybridDQNMultiHead
+    from masked_actions import CategoricalMasked
 
 
 envs_to_run = []
