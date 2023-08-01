@@ -36,6 +36,7 @@ if not IS_SERVER:
     import os, sys
     folder_path = os.path.abspath('create')
     sys.path.append(folder_path)
+    import create
     from create.create_game.settings import CreateGameSettings
 
 else:
@@ -47,6 +48,7 @@ else:
 
     folder_path = os.path.abspath('create')
     sys.path.append(folder_path)
+    import create
     from create.create_game.settings import CreateGameSettings
 
 
