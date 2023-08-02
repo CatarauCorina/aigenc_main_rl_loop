@@ -13,8 +13,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class SegmentAnythingObjectExtractor(object):
 
-    def __init__(self, checkpoint="sam_vit_b_01ec64.pth", model_type="vit_b", no_objects=8):
-        self.checkpoint_path = "../segment_anything_objects/checkpoints"
+    def __init__(self, checkpoint="sam_vit_b_01ec64.pth", model_type="vit_b", no_objects=6):
+        self.checkpoint_path = "../co_segment_anything/checkpoints"
         self.checkpoint_file = f'{self.checkpoint_path}/{checkpoint}'
         self.sam_model = sam_model_registry[model_type](checkpoint=self.checkpoint_file).to(device).eval()
         self.sam_encoder = SamPredictor(self.sam_model)
