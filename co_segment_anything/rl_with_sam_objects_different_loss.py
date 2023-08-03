@@ -1,6 +1,5 @@
 import random
 import wandb
-import gym
 import sys
 import numpy as np
 from collections import namedtuple
@@ -8,8 +7,6 @@ from itertools import count
 from PIL import Image
 
 import torch
-import torch.nn.functional as F
-
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as T
@@ -21,11 +18,12 @@ from co_segment_anything.dqn_sam import DQN
 from co_segment_anything.sam_utils import SegmentAnythingObjectExtractor
 from create.create_game.settings import CreateGameSettings
 
+
 envs_to_run = []
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward','mask', 'inventory'))
+Transition = namedtuple('Transition', ('state', 'action','reward', 'next_state', 'done', 'mask', 'inventory'))
 
 
 class TrainModel(object):
@@ -37,11 +35,9 @@ class TrainModel(object):
         self.memory=None
         self.writer = writer
         self.params = params
-        self.masked= masked
-
         self.object_extractor = SegmentAnythingObjectExtractor()
 
-    def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=30):
+    def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=2000):
         episode_durations = []
         num_episodes = 3000
         steps_done = 0
@@ -49,7 +45,6 @@ class TrainModel(object):
         smallest_loss = 99999
         loss = 0
         for i_episode in range(num_episodes):
-            print(f"Episode:{i_episode}")
             # Initialize the environment and state
             obs = self.env.reset()
             #state = self.process_frames(obs)
@@ -57,62 +52,67 @@ class TrainModel(object):
             rew_ep = 0
             loss_ep = 0
             losses = []
-            timestep = 0
+
             for t in count():
                 # Select and perform an action
-                timestep += 1
                 action, steps_done, mask, inventory = self.select_action(state, params, policy_net, len(self.env.allowed_actions), steps_done)
 
-                returned_state, reward, done, _ = self.env.step(action[0])
+                screen, reward, done, _ = self.env.step(action[0])
                 self.writer.log({"Action taken": action[0][0]})
                 reward = torch.tensor([reward], device=device)
 
                 rew_ep += reward.item()
                 #current_screen = self.process_frames(screen)
-                current_screen = self.object_extractor.extract_objects(returned_state)
+                current_screen = self.object_extractor.extract_objects(screen)
                 if not done:
                     next_state = current_screen
                 else:
                     next_state = None
 
                 # Store the transition in memory
-                if next_state is not None:
-                    memory.push(state, action[0], next_state, reward, mask, inventory)
+                memory.push(state, action[0], reward, next_state, done, mask, inventory)
 
                 # Move to the next state
+                prev_state = state
                 state = next_state
 
                 # Perform one step of the optimization (on the target network)
-                loss_ep = self.optimize_model(policy_net, target_net, params, memory, optimizer, loss_ep, writer)
+                if len(memory) > 32:
+                    loss_ep = self.compute_td_loss(policy_net, memory, params, optimizer)
+                    losses.append(loss_ep.item())
+                    self.writer.log(
+                        {"Loss/iter": loss_ep, "Episode": counter})
+                    counter +=1
 
                 if done or t == max_timesteps:
                     episode_durations.append(t + 1)
+                    print(f'---End of episode-- {i_episode}')
                     self.writer.log(
-                        {"Reward episode": rew_ep, "Episode duration": t + 1, "Train loss": loss_ep / (t + 1)})
-                    # print(loss_ep / (t + 1))
-                    # episode_frames_wandb = make_grid(episode_frames)
-                    # images = wandb.Image(episode_frames_wandb, caption=f'Episode {i_episode} states')
-                    # self.writer.log({'states': episode_frames})
+                        {"Reward/episode": rew_ep, "Episode": i_episode})
+                    print(rew_ep)
+
+
+                    loss = np.sum(losses)
+                    self.writer.log(
+                        {"Loss/episode": loss/(t+1), "Episode": i_episode})
 
                     break
-                # Update the target network, copying all weights and biases in DQN
-            if i_episode % params['target_update'] == 0:
-                target_net.load_state_dict(policy_net.state_dict())
-            if i_episode % 300 == 0 and i_episode != 0:
-                self.evaluate(target_net, writer, i_episode)
-            if i_episode % 300 == 0 and i_episode != 0:
-                PATH = f"model_{i_episode}_{loss_ep}.pt"
+            if i_episode % 20 == 0 and i_episode != 0 and loss < smallest_loss:
+                PATH = f"model_with_obj_{i_episode}.ckp"
+
                 torch.save({
-                    'epoch': i_episode,
+                    'episode': i_episode,
                     'model_state_dict': policy_net.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss_ep,
                 }, PATH)
+                smallest_loss = loss
+
         return
 
     def compute_td_loss(self, model, replay_buffer, params, optimizer, batch_size=32):
 
-        state, action, reward, next_state, done, non_final_mask = replay_buffer.sample_td(batch_size)
+        state, action, reward, next_state, done, non_final_mask, mask ,inventory = replay_buffer.sample_td(batch_size)
+
         # state = self.object_extractor.extract_objects(state)
         # next_state = self.object_extractor.extract_objects(next_state)
 
@@ -148,35 +148,31 @@ class TrainModel(object):
 
         return loss
 
-    def init_model(self, actions=0, checkpoint_file=""):
+    def init_model(self, actions=4, checkpoint_file=""):
         obs = self.env.reset()
         init_screen = self.object_extractor.extract_objects(obs)
         # init_screen = self.process_frames(obs)
         # _, _, screen_height, screen_width = init_screen.shape
         if actions == 0:
-            n_actions = len(self.env.allowed_actions)
+            n_actions = self.env.action_space.n
         else:
             n_actions = actions
-        n_actions_cont = 2
         #objects_in_init_screen = self.object_extractor.extract_objects(init_screen.squeeze(0))
-        policy_net = self.model_to_train(init_screen.shape, n_actions, n_actions_cont, self.env).to(device)
-        target_net = self.model_to_train(init_screen.shape, n_actions, n_actions_cont, self.env).to(device)
-        target_net.load_state_dict(policy_net.state_dict())
-        target_net.eval()
-
+        policy_net = self.model_to_train(init_screen.shape, n_actions).to(device)
         optimizer = optim.RMSprop(policy_net.parameters())
         optimizer = optim.Adam(policy_net.parameters(), lr=0.00001)
-
-
         if checkpoint_file != "":
             print(f"Trainning from checkpoint {checkpoint_file}")
             checkpoint = torch.load(checkpoint_file)
             policy_net.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        target_net = self.model_to_train(init_screen.shape, n_actions).to(device)
+        target_net.load_state_dict(policy_net.state_dict())
+        target_net.eval()
+
         if self.use_memory[0] is not None:
             self.memory = ReplayMemory(self.use_memory[1])
             self.train(target_net, policy_net, self.memory, self.params, optimizer, self.writer)
-
         return
 
     def process_frames(self,obs):
@@ -187,14 +183,6 @@ class TrainModel(object):
         _, screen_height, screen_width = screen.shape
         screen = torch.tensor(screen)
         return resize(screen).unsqueeze(0).to(device)
-
-    def compute_mask(self):
-        sorter = np.argsort(self.env.allowed_actions)
-        b = sorter[np.searchsorted(self.env.allowed_actions, self.env.inventory, sorter=sorter)]
-        mask = np.zeros(self.env.allowed_actions.shape, dtype=bool)  # np.ones_like(a,dtype=bool)
-        mask[b] = True
-
-        return torch.tensor(mask, device=device), self.env.inventory
 
     def select_action(self, state, params, policy_net, n_actions, steps_done):
         sample = random.random()
@@ -208,87 +196,79 @@ class TrainModel(object):
                 # second column on max result is index of where max element was
                 # found, so we pick action with the larger expected reward.
                 #Exploiting
-                mask, inventory = self.compute_mask()
-                q_vals_discrete, q_val_cont, action_sel = policy_net(state, mask, torch.tensor(inventory).unsqueeze(0))
-                return action_sel, steps_done, mask, torch.tensor(inventory).unsqueeze(0)
+                return torch.tensor([[self.ACTIONS_TO_USE[policy_net(state).max(1)[1].view(1, 1)]]], device=device, dtype=torch.long), steps_done
         else:
-            random_action_from_inventory = np.where(self.env.inventory == random.choice(self.env.inventory))[0]
-            mask, inventory = self.compute_mask()
-            return [[random_action_from_inventory.item(), random.uniform(-1,1), random.uniform(-1, 1)]], steps_done, mask, torch.tensor(inventory).unsqueeze(0)
+            return torch.tensor([[random.choice(self.ACTIONS_TO_USE)]], device=device, dtype=torch.long), steps_done
 
     def optimize_model(self, policy_net, target_net, params, memory, optimizer, loss_ep, writer):
         if len(memory) < params['batch_size']:
             return loss_ep
-
         transitions = memory.sample(params['batch_size'])
+        # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+        # detailed explanation). This converts batch-array of Transitions
+        # to Transition of batch-arrays.
         batch = Transition(*zip(*transitions))
 
-        # Convert the batch of transitions to tensors
-        state_batch = torch.cat(batch.state).to(device)
-        action_batch = torch.tensor(batch.action).float().to(device)
-        next_state_batch = torch.cat(batch.next_state).to(device)
-        reward_batch = torch.cat(batch.reward).float().to(device)
-        mask_batch = torch.stack(batch.mask)
-        inventory_batch = torch.stack(batch.inventory)
+        # Compute a mask of non-final states and concatenate the batch elements
+        # (a final state would've been the one after which simulation ended)
+        non_final_mask = torch.tensor(
+            tuple(map(lambda s: s is not None, batch.next_state)), device=device, dtype=torch.bool)
+        non_final_next_states = torch.cat(
+            [s for s in batch.next_state if s is not None])
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        reward_batch = torch.tensor(batch.reward, dtype=torch.float32)
 
-        # Separate the categorical and continuous actions in the action batch
-        num_categorical_actions = policy_net.num_discrete_actions
-        categorical_actions = action_batch[:, :num_categorical_actions]
-        continuous_actions = action_batch[:, num_categorical_actions:]
+        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+        # columns of actions taken. These are the actions which would've been taken
+        # for each batch state according to policy_net
+        # Map action batch to 4 actions
+        action_batch_new = torch.tensor([self.ACTIONS_TO_USE.index(a.item()) for a in action_batch], dtype=torch.int64, device=device)
+        action_batch_new = action_batch_new.view(action_batch_new.shape[0], 1)
+        state_action_values = policy_net(state_batch).gather(1, action_batch_new)
 
-        # Compute the Q values for the current state-action pairs using the policy network
-        q_values_categorical, q_values_continuous, actions = policy_net(state_batch, mask_batch, inventory_batch)
-        actions = torch.tensor(actions, device=device, requires_grad=True, dtype=torch.float32)
-        # state_action_values = q_values_categorical.gather(1, categorical_actions.long()).squeeze()
-        # state_action_values_continuous = torch.sum(q_values_continuous * continuous_actions, dim=1)
-
-        # Compute the Q values for the next states using the target network
-
-        next_q_values_categorical, next_q_values_continuous, actions_next_state = target_net(next_state_batch,
-                                                                                             mask_batch,
-                                                                                             inventory_batch)
-        actions_next_state = torch.tensor(actions_next_state, device=device, requires_grad=True, dtype=torch.float32)
-
-        # # Compute the maximum Q values for the next states (used for the target values)
-        # next_state_values, _ = torch.max(next_q_values_categorical, dim=1)
-        # next_state_values_continuous = torch.sum(next_q_values_continuous * continuous_actions, dim=1)
-        #
-        # # Compute the target Q values using the Bellman equation
-        expected_state_action_values = reward_batch + params["gamma"] * actions_next_state[:, 0]
-        expected_state_action_values_continuous = reward_batch + params["gamma"] * actions_next_state[:, 1:].sum(dim=1)
-
-        # Calculate the categorical loss (Cross-Entropy Loss)
-        categorical_loss = F.smooth_l1_loss(actions[:, 0], expected_state_action_values)
-
-        # Calculate the continuous loss (Mean Squared Error)
-        continuous_loss = F.mse_loss(actions[:, 1:].sum(dim=1), expected_state_action_values_continuous)
-
-        # Calculate the total loss (sum of categorical and continuous losses)
-        total_loss = categorical_loss + continuous_loss
+        # Compute V(s_{t+1}) for all next states.
+        # Expected values of actions for non_final_next_states are computed based
+        # on the "older" target_net; selecting their best reward with max(1)[0].
+        # This is merged based on the mask, such that we'll have either the expected
+        # state value or 0 in case the state was final.
+        next_state_values = torch.zeros(params['batch_size'], device=device)
+        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
+        # Compute the expected Q values
+        reward_batch = torch.tensor(reward_batch, dtype=torch.float32).to(device)
         writer.log({'Batch reward': reward_batch.sum().output_nr})
-        # Optimize the policy network
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+        expected_state_action_values = (next_state_values * params['gamma']) + reward_batch
 
-        return total_loss.item()
+        # Compute Huber loss
+        #loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        loss = nn.MSELoss()(state_action_values, expected_state_action_values.unsqueeze(1))
+        loss_ep = loss_ep + loss.item()
+
+        # Optimize the model
+        optimizer.zero_grad()
+        loss.backward()
+        for param in policy_net.parameters():
+            param.grad.data.clamp_(-1, 1)
+        optimizer.step()
+        return loss_ep
 
     def evaluate(self, target_net, writer, i_episode, max_timesteps=1000):
         with torch.no_grad():
             # Initialize the environment and state
             obs = self.env.reset()
-            # last_screen = self.process_frames()
-            current_screen = self.process_frames(obs)
-            state = current_screen
+            #last_screen = self.process_frames()
+            #current_screen = self.process_frames(obs)
+            state = self.object_extractor.extract_objects(obs)
             rew_ep = 0
             for t in count():
-                mask, inventory = self.compute_mask()
-                q_vals_discrete, q_val_cont, action_sel = target_net(state, mask, torch.tensor(inventory).unsqueeze(0))
-                screen, reward, done, _ = self.env.step(action_sel[0])
-                reward = torch.tensor([reward], device=device, dtype=torch.float32)
+                action = self.ACTIONS_TO_USE[target_net(state).max(1)[1].view(1, 1)]
+                screen, reward, done, _ = self.env.step(action)
+                reward = torch.tensor([reward], device=device)
                 rew_ep += reward.item()
-                state = self.process_frames(screen)
-                if done or t == max_timesteps:
+                #state = self.process_frames(screen)
+                state = self.object_extractor.extract_objects(screen)
+                if done or t==max_timesteps:
+                    writer.add_scalar('Reward ep test', rew_ep, i_episode)
                     writer.log({"Reward episode test": rew_ep})
                     break
         return
@@ -324,8 +304,11 @@ class ReplayMemory(object):
         state_batch = torch.cat(batch.state)
         action_batch = torch.cat(batch.action)
         reward_batch = torch.tensor(batch.reward, dtype=torch.float32)
-        return state_batch, action_batch, reward_batch, non_final_next_states, torch.tensor(batch.done,
-                                                                                            dtype=torch.int64), non_final_mask
+        mask_batch = torch.stack(batch.mask)
+        inventory_batch = torch.stack(batch.inventory)
+
+        return state_batch, action_batch, reward_batch, non_final_next_states, \
+               torch.tensor(batch.done, dtype=torch.int64), non_final_mask, mask_batch, inventory_batch
 
     def __len__(self):
         return len(self.memory)
@@ -342,33 +325,28 @@ def process_frames_a(state):
 def main():
     args = sys.argv[1:]
     checkpoint_file = ""
-    if len(args) >0 and args[0] == '-checkpoint':
+    if args[0] == '-checkpoint':
         checkpoint_file = args[1]
     params = {
         'batch_size': 10,
         'gamma': 0.99,
         'eps_start': 0.9,
-        'eps_end': 0.02,
+        'eps_end':0.02,
         'eps_decay': .999985,
         'target_update': 1000
     }
 
-    env = gym.make(f'CreateLevelPush-v0')
-    settings = CreateGameSettings(
-        evaluation_mode=True,
-        max_num_steps=30,
-        render_mega_res=False,
-        render_ball_traces=False)
-    env.set_settings(settings)
-    env.reset()
-    done = False
-    frames = []
+    env_loader = AnimalAIEnvironmentLoader(
+        random_config=False,
+        config_file_name="config_multiple_209.yml",
+        is_server=IS_SERVER)
+    env = env_loader.get_animalai_env()
 
-    wandb_logger = Logger(f"6_obj{checkpoint_file}samobjects_dqn_create", project='test_create_rl_loop')
+    wandb_logger = Logger(f"{checkpoint_file}samobjects_dqn_no_target_64image", project='rl_loop')
     logger = wandb_logger.get_logger()
     trainer = TrainModel(DQN,
                          env, (True, 1000),
-                         logger,True, params)
+                         logger, params)
     trainer.init_model(checkpoint_file=checkpoint_file)
 
 
