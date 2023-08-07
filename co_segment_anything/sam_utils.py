@@ -1,6 +1,7 @@
 import torch
 import torchvision.models as models
 import torchvision.transforms as transforms
+import os
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry, SamPredictor
 import numpy as np, cv2
 import torch
@@ -15,6 +16,7 @@ class SegmentAnythingObjectExtractor(object):
 
     def __init__(self, checkpoint="sam_vit_b_01ec64.pth", model_type="vit_b", no_objects=6):
         self.checkpoint_path = "/co_segment_anything/checkpoints"
+        print(os.getcwd())
         self.checkpoint_file = f'{self.checkpoint_path}/{checkpoint}'
         self.sam_model = sam_model_registry[model_type](checkpoint=self.checkpoint_file).to(device).eval()
         self.sam_encoder = SamPredictor(self.sam_model)
