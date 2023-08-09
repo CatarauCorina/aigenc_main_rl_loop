@@ -98,7 +98,7 @@ class TrainModel(object):
                 # Update the target network, copying all weights and biases in DQN
             if i_episode % params['target_update'] == 0:
                 target_net.load_state_dict(policy_net.state_dict())
-            if i_episode % 100 == 0 and i_episode != 0:
+            if i_episode % 150 == 0 and i_episode != 0:
                 self.evaluate(target_net, writer, i_episode)
             if i_episode % 100 == 0 and i_episode != 0:
                 PATH = f"model_{i_episode}_{loss_ep}.pt"
@@ -278,7 +278,7 @@ class TrainModel(object):
             # Initialize the environment and state
             obs = self.env.reset()
             # last_screen = self.process_frames()
-            current_screen = self.process_frames(obs)
+            current_screen = self.process_frames(obs.copy())
             state = current_screen
             rew_ep = 0
             for t in count():
