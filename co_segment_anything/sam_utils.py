@@ -8,6 +8,7 @@ import torch
 import scipy
 from PIL import Image
 import torch.nn.functional as F
+from memory_graph.init_concept_space import ObjectConcept
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -15,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SegmentAnythingObjectExtractor(object):
 
     def __init__(self, checkpoint="sam_vit_b_01ec64.pth", model_type="vit_b", no_objects=6):
-        self.checkpoint_path = "co_segment_anything/checkpoints"
+        self.checkpoint_path = "../co_segment_anything/checkpoints"
         print(os.getcwd())
         self.checkpoint_file = f'{self.checkpoint_path}/{checkpoint}'
         self.sam_model = sam_model_registry[model_type](checkpoint=self.checkpoint_file).to(device).eval()
@@ -51,6 +52,7 @@ class SegmentAnythingObjectExtractor(object):
             masked = np.where(mask_arr == 0, frame_reduced, 0)
             tensor = self.transform(masked).float()
             objects.append(tensor)
+
         obj_tensor = torch.stack(objects).to(device)
         encoded_objs = self.encoder(obj_tensor)
         encoded_objs = encoded_objs.detach()

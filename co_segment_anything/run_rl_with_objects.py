@@ -20,6 +20,7 @@ from baseline_models.logger import Logger
 from co_segment_anything.dqn_sam import DQN
 from co_segment_anything.sam_utils import SegmentAnythingObjectExtractor
 from create.create_game.settings import CreateGameSettings
+from memory_graph.gds_concept_space import ConceptSpaceGDS
 
 envs_to_run = []
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,6 +41,7 @@ class TrainModel(object):
         self.masked= masked
 
         self.object_extractor = SegmentAnythingObjectExtractor()
+        self.concept_space = ConceptSpaceGDS()
 
     def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=30):
         episode_durations = []
@@ -50,6 +52,7 @@ class TrainModel(object):
         loss = 0
         for i_episode in range(num_episodes):
             print(f"Episode:{i_episode}")
+            episode_memory = []
             # Initialize the environment and state
             obs = self.env.reset()
             #state = self.process_frames(obs)
@@ -70,6 +73,9 @@ class TrainModel(object):
                 rew_ep += reward.item()
                 #current_screen = self.process_frames(screen)
                 current_screen = self.object_extractor.extract_objects(returned_state)
+                episode_memory.append(current_screen)
+                ids = self.concept_space.add_data('ObjectConcept')
+                self.concept_space.update_node_by_id(ids['elementId(n)'][0],current_screen.squeeze(0).squeeze(0)[0].tolist())
                 if not done:
                     next_state = current_screen
                 else:
@@ -364,7 +370,7 @@ def main():
     done = False
     frames = []
 
-    wandb_logger = Logger(f"6_obj{checkpoint_file}samobjects_dqn_create", project='test_create_rl_loop')
+    wandb_logger = Logger(f"6_obj{checkpoint_file}samobjects_dqn_create", project='memory_testing')
     logger = wandb_logger.get_logger()
     trainer = TrainModel(DQN,
                          env, (True, 1000),
