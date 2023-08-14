@@ -52,11 +52,13 @@ class TrainModel(object):
         loss = 0
         for i_episode in range(num_episodes):
             print(f"Episode:{i_episode}")
+            concept_space_episode_id = self.concept_space.add_data('Episode')
+            episode_id = concept_space_episode_id['elementId(n)'][0]
             episode_memory = []
             # Initialize the environment and state
             obs = self.env.reset()
             #state = self.process_frames(obs)
-            state = self.object_extractor.extract_objects(obs)
+            state, encoded_state = self.object_extractor.extract_objects(obs)
             rew_ep = 0
             loss_ep = 0
             losses = []
@@ -72,10 +74,11 @@ class TrainModel(object):
 
                 rew_ep += reward.item()
                 #current_screen = self.process_frames(screen)
-                current_screen = self.object_extractor.extract_objects(returned_state)
-                episode_memory.append(current_screen)
-                ids = self.concept_space.add_data('ObjectConcept')
-                self.concept_space.update_node_by_id(ids['elementId(n)'][0],current_screen.squeeze(0).squeeze(0)[0].tolist())
+                current_screen, encoded_state = self.object_extractor.extract_objects(returned_state)
+                # episode_memory.append(current_screen)
+                # ids = self.concept_space.add_data('ObjectConcept')
+                # self.concept_space.update_node_by_id(ids['elementId(n)'][0],current_screen.squeeze(0).squeeze(0)[0].tolist())
+                self.concept_space.add_state_with_objects(encoded_state, current_screen, episode_id, timestep)
                 if not done:
                     next_state = current_screen
                 else:
@@ -156,7 +159,7 @@ class TrainModel(object):
 
     def init_model(self, actions=0, checkpoint_file=""):
         obs = self.env.reset()
-        init_screen = self.object_extractor.extract_objects(obs)
+        init_screen, state_enc = self.object_extractor.extract_objects(obs)
         # init_screen = self.process_frames(obs)
         # _, _, screen_height, screen_width = init_screen.shape
         if actions == 0:

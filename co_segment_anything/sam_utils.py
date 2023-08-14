@@ -42,6 +42,7 @@ class SegmentAnythingObjectExtractor(object):
 
     def extract_objects(self, frame):
         objects = []
+
         #frame_reduced = self.pil_transform(frame).permute(1, 2, 0).detach().numpy()
         frame_reduced = cv2.resize(frame, dsize=(self.im_height, self.im_width), interpolation=cv2.INTER_CUBIC)
         masks = self.mask_generator.generate(frame_reduced)
@@ -55,11 +56,14 @@ class SegmentAnythingObjectExtractor(object):
 
         obj_tensor = torch.stack(objects).to(device)
         encoded_objs = self.encoder(obj_tensor)
+        transform = transforms.ToTensor()
+        tensor_img_reduced = transform(frame_reduced).to(device)
+        encoded_state = self.encoder(tensor_img_reduced.unsqueeze(0))
         encoded_objs = encoded_objs.detach()
         if len(masks) < self.no_objects:
             encoded_objs = F.pad(input=encoded_objs, pad=(0, 0, self.no_objects-len(masks), 0), mode='constant', value=0)
 
-        return encoded_objs.unsqueeze(0).unsqueeze(0).to(device)
+        return encoded_objs.unsqueeze(0).unsqueeze(0).to(device), encoded_state
 
     def find_objects_positions(self, frame):
         objects_positions = []
