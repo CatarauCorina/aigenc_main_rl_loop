@@ -140,7 +140,7 @@ class ConceptSpaceGDS:
                     USE {self.memory_type}
                     match (e:Episode)-[r:has_state]->(s:StateT)-[r1:has_object]->(o:ObjectConcept) 
                     where s.episode_id={episode_id} and r.t={time}
-                    return elementId(o), o.att
+                    return elementId(o) as id_o , o.att
                 """
             )
             return pd.DataFrame([r.values() for r in result], columns=result.keys())
@@ -152,10 +152,28 @@ class ConceptSpaceGDS:
                      USE {self.memory_type}
                     match (e:Episode)-[r:has_state]->(s:StateT)-[r1:has_object]->(o:ObjectConcept) 
                     where s.episode_id={episode_id} and r.t < {time}
-                    return elementId(o),collect(r.t),collect(o.att), collect(s.reward)
+                    return elementId(o) as id_o ,collect(r.t),collect(o.att), collect(s.reward)
                 """
             )
             return pd.DataFrame([r.values() for r in result], columns=result.keys())
+
+    def update_objects_attention(self, object_ids_att_values):
+        with self.driver.session() as session:
+            # result = session.run(
+            #     f"""
+            #         USE {self.memory_type}
+            #         UNWIND {object_ids_att_values} AS p
+            #         MATCH (o:ObjectConcept) WHERE elementId(o) = p.elementId(o)
+            #         SET o.att = p.new_value_obj_i
+            #     """
+            # )
+            r = session.run(
+                f"USE {self.memory_type}\
+                UNWIND $obj_batch as obj \
+                MATCH (o:ObjectConcept) WHERE elementId(o) = obj.id_o \
+                SET o.att = obj.new_value_obj_i", obj_batch=object_ids_att_values
+            )
+            return
 
 
 if __name__ == "__main__":

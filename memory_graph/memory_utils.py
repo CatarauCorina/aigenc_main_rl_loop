@@ -11,7 +11,7 @@ class WorkingMemory:
     NEO_USER = os.environ['NEO_USER']
     NEO_PASS = os.environ['NEO_PASS']
 
-    def __init__(self, default_name='objectConcept', which_db="workingmemory"):
+    def __init__(self, default_name='objectConcept', which_db="longtermmemory"):
         self.gds = GraphDataScience(self.DATABASE_URL, auth=(self.NEO_USER, self.NEO_PASS))
         print(self.gds.version())
         self.project_name = default_name
@@ -162,6 +162,8 @@ class WorkingMemory:
             obj = self.concept_space.add_data('ObjectConcept')
             random_value = list(np.random.uniform(low=0.1, high=1, size=(1000,)))
             self.concept_space.update_node_by_id(obj['elementId(n)'][0],  random_value)
+            self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
+
             project_name = self.gds_init_project_catalog_objects()
         objects, state_id = self.concept_space.add_state_with_objects(
             encoded_state,
@@ -183,13 +185,13 @@ class WorkingMemory:
                 obj = self.concept_space.add_data('ObjectConcept')
                 self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'parent_id_state', [state_split])
                 self.concept_space.update_node_by_id(obj['elementId(n)'][0], obj_list)
-                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.0001)
+                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
                 obj_id = obj['elementId(n)'][0]
             self.concept_space.match_state_add_node(state_id, obj_id)
         self.concept_space.close()
         return
 
-    def compute_attention(self, time, episode_id, omega=0.1, beta=0.1, default_alpha=0.01):
+    def compute_attention(self, time, episode_id, omega=0.1, beta=0.1, default_alpha=0.1):
         ep_id = int(episode_id.split(':')[2])
         reinforcer_and_sum = self.concept_space.objects_attention_and_reinforcer(time, ep_id)
         reinforcer_time_t = reinforcer_and_sum['reinforcer'][0]
@@ -201,19 +203,21 @@ class WorkingMemory:
 
         obj_values_prev_time = self.concept_space.get_obj_att_values_prev_time(time, ep_id)
         if not obj_values_prev_time.empty:
-            obj_to_update = pd.merge(df_all_obj_att, obj_values_prev_time, on="elementId(o)")
-
             obj_values_prev_time['last_value_obj_i'] = [x[len(x) -1] for x in list(obj_values_prev_time['collect(o.att)'])]
             obj_values_prev_time['sum_val_obj_not_i'] = obj_values_prev_time['last_value_obj_i'].sum() - obj_values_prev_time['last_value_obj_i']
-            obj_values_prev_time['alpha_obj_i'] = -0.01*(reward_current_time - obj_values_prev_time['last_value_obj_i']) - (reward_current_time- obj_values_prev_time['sum_val_obj_not_i'])
+            obj_values_prev_time['alpha_obj_i'] = -omega*(reward_current_time - obj_values_prev_time['last_value_obj_i']) - (reward_current_time- obj_values_prev_time['sum_val_obj_not_i'])
 
-            obj_to_update['delta_obj_i'] = obj_to_update['alpha_obj_i']*0.01*(1-obj_to_update['o.att'])*reinforcer_time_t
+            obj_to_update = pd.merge(df_all_obj_att, obj_values_prev_time, on="id_o")
+            obj_to_update['delta_obj_i'] = obj_to_update['alpha_obj_i']*beta*(1-obj_to_update['o.att'])*reinforcer_time_t
             obj_to_update['new_value_obj_i'] = obj_to_update['o.att'] + obj_to_update['delta_obj_i']
         else:
             obj_to_update = df_all_obj_att
-            obj_to_update['delta_obj_i'] = default_alpha * 0.01 * (
+            obj_to_update['delta_obj_i'] = default_alpha * beta * (
                         1 - obj_to_update['o.att']) * reinforcer_time_t
             obj_to_update['new_value_obj_i'] = obj_to_update['o.att'] + obj_to_update['delta_obj_i']
+
+        dict_values_to_update = list(obj_to_update[['id_o', 'new_value_obj_i']].to_dict('index').values())
+        self.concept_space.update_objects_attention(dict_values_to_update)
         return
 
 
