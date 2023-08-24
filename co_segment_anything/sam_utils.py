@@ -51,6 +51,9 @@ class SegmentAnythingObjectExtractor(object):
             mask_inverted = np.invert(mask['segmentation']).astype(int)
             mask_arr = np.stack((mask_inverted,) * 3, axis=-1)
             masked = np.where(mask_arr == 0, frame_reduced, 0)
+            # import matplotlib.pyplot as plt
+            # plt.imshow(masked)
+            # plt.show()
             tensor = self.transform(masked).float()
             objects.append(tensor)
 

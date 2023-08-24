@@ -21,6 +21,7 @@ from co_segment_anything.dqn_sam import DQN
 from co_segment_anything.sam_utils import SegmentAnythingObjectExtractor
 from create.create_game.settings import CreateGameSettings
 from memory_graph.gds_concept_space import ConceptSpaceGDS
+from memory_graph.memory_utils import WorkingMemory
 
 envs_to_run = []
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,7 +42,8 @@ class TrainModel(object):
         self.masked= masked
 
         self.object_extractor = SegmentAnythingObjectExtractor()
-        self.concept_space = ConceptSpaceGDS()
+        self.concept_space = ConceptSpaceGDS(memory_type="workingmemory")
+        self.wm = WorkingMemory()
 
     def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=30):
         episode_durations = []
@@ -54,6 +56,7 @@ class TrainModel(object):
             print(f"Episode:{i_episode}")
             concept_space_episode_id = self.concept_space.add_data('Episode')
             episode_id = concept_space_episode_id['elementId(n)'][0]
+            self.concept_space.close()
             episode_memory = []
             # Initialize the environment and state
             obs = self.env.reset()
@@ -78,13 +81,15 @@ class TrainModel(object):
                 # episode_memory.append(current_screen)
                 # ids = self.concept_space.add_data('ObjectConcept')
                 # self.concept_space.update_node_by_id(ids['elementId(n)'][0],current_screen.squeeze(0).squeeze(0)[0].tolist())
-                self.concept_space.add_state_with_objects(encoded_state, current_screen, episode_id, timestep)
+                #self.concept_space.add_state_with_objects(encoded_state, current_screen, episode_id, timestep)
+                self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep, reward)
                 if not done:
                     next_state = current_screen
                 else:
                     next_state = None
 
                 # Store the transition in memory
+                self.wm.compute_attention(timestep, episode_id)
                 if next_state is not None:
                     memory.push(state, action[0], next_state, reward, mask, inventory)
 

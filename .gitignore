@@ -12,6 +12,7 @@ __pycache__/
 *.x86_64
 *.x86
 co_segment_anything/checkpoints/*
+*.pt
 co_segment_anything/wandb/*
 
 __pycache__/
