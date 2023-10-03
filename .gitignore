@@ -12,6 +12,8 @@ __pycache__/
 *.x86_64
 *.x86
 co_segment_anything/checkpoints/*
+affordance_learning/checkpoints_ns_aff/*
+affordance_learning/wandb/*
 *.pt
 co_segment_anything/wandb/*
 

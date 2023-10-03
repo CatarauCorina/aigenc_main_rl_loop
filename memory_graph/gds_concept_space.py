@@ -140,7 +140,7 @@ class ConceptSpaceGDS:
                     USE {self.memory_type}
                     match (e:Episode)-[r:has_state]->(s:StateT)-[r1:has_object]->(o:ObjectConcept) 
                     where s.episode_id={episode_id} and r.t={time}
-                    return elementId(o) as id_o , o.att
+                    return elementId(o) as id_o , o.att,o.alpha as alpha, o.all_att_values as att_values
                 """
             )
             return pd.DataFrame([r.values() for r in result], columns=result.keys())
@@ -152,7 +152,7 @@ class ConceptSpaceGDS:
                      USE {self.memory_type}
                     match (e:Episode)-[r:has_state]->(s:StateT)-[r1:has_object]->(o:ObjectConcept) 
                     where s.episode_id={episode_id} and r.t < {time}
-                    return elementId(o) as id_o ,collect(r.t),collect(o.att), collect(s.reward)
+                    return elementId(o) as id_o ,collect(r.t),o.att as prev_att,o.alpha as alpha, collect(s.reward)
                 """
             )
             return pd.DataFrame([r.values() for r in result], columns=result.keys())
@@ -171,10 +171,36 @@ class ConceptSpaceGDS:
                 f"USE {self.memory_type}\
                 UNWIND $obj_batch as obj \
                 MATCH (o:ObjectConcept) WHERE elementId(o) = obj.id_o \
-                SET o.att = obj.new_value_obj_i", obj_batch=object_ids_att_values
+                SET o.att = obj.new_value_obj_i set o.all_att_values=obj.att_values set o.alpha=obj.alpha_obj_i", obj_batch=object_ids_att_values
             )
             return
 
+
+    def get_attention_for_episode(self, ep_id="4:35c6f93f-aedf-40a2-ba92-c88bc937e420:883"):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""USE {self.memory_type}\
+                      match(e:Episode)-[r:has_state]-(s)-[:has_object]->(o) where elementId(e)="{ep_id}"\
+                      return elementId(o),collect(elementId(s)), collect(s.reward),collect(r.t),collect(o.all_att_values), o.alpha"""
+            )
+            return pd.DataFrame([r.values() for r in result], columns=result.keys())
+
+
+    def get_objects_associated_with_reward(self, reward_value=0.01):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""USE {self.memory_type}\
+                      match (s:StateT)-[:has_object]->(o:ObjectConcept) where s.reward >= {reward_value} return elementId(o) as obj_id, collect(o.all_att_values) as obj_values"""
+            )
+            return pd.DataFrame([r.values() for r in result], columns=result.keys())
+
+    def get_objects_associated_with_0reward(self, reward_value=0):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""USE {self.memory_type}\
+                      match (s:StateT)-[:has_object]->(o:ObjectConcept) where s.reward={reward_value} return elementId(o) as obj_id, collect(o.all_att_values) as obj_values"""
+            )
+            return pd.DataFrame([r.values() for r in result], columns=result.keys())
 
 if __name__ == "__main__":
     cs_memory = ConceptSpaceGDS()

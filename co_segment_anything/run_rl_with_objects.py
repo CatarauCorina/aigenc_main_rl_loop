@@ -42,7 +42,7 @@ class TrainModel(object):
         self.masked= masked
 
         self.object_extractor = SegmentAnythingObjectExtractor()
-        self.concept_space = ConceptSpaceGDS(memory_type="longtermmemory")
+        self.concept_space = ConceptSpaceGDS(memory_type="wmtest")
         self.wm = WorkingMemory()
 
     def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=30):

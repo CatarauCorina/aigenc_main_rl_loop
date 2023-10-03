@@ -1,30 +1,110 @@
 import torch
 
 from torch import nn
+from torch.nn import functional as F
 from torch.autograd import Variable
 
 
 # Module for residual/skip connections
 class FCResBlock(nn.Module):
-    def __init__(self, width, n, nonlinearity):
+    def __init__(self, dim, n, nonlinearity, batch_norm=True):
         """
 
-        :param width:
+        :param dim:
         :param n:
         :param nonlinearity:
         """
         super(FCResBlock, self).__init__()
         self.n = n
         self.nonlinearity = nonlinearity
-        self.block = nn.ModuleList([nn.Linear(width, width) for _ in range(self.n)])
+        self.batch_norm = batch_norm
+        if self.batch_norm:
+            self.block = nn.ModuleList(
+                [nn.ModuleList([nn.Linear(dim, dim), nn.BatchNorm1d(num_features=dim)])
+                 for _ in range(self.n)]
+            )
+        else:
+            self.block = nn.ModuleList([nn.Linear(dim, dim) for _ in range(self.n)])
 
     def forward(self, x):
         e = x + 0
-        for i, layer in enumerate(self.block):
-            e = layer(e)
-            if i < (self.n - 1):
-                e = self.nonlinearity(e)
+
+        if self.batch_norm:
+            for i, pair in enumerate(self.block):
+                fc, bn = pair
+                e = fc(e)
+                e = bn(e)
+                if i < (self.n - 1):
+                    e = self.nonlinearity(e)
+
+        else:
+            for i, layer in enumerate(self.block):
+                e = layer(e)
+                if i < (self.n - 1):
+                    e = self.nonlinearity(e)
+
         return self.nonlinearity(e + x)
+
+
+# Building block for convolutional encoder with same padding
+class Conv2d3x3(nn.Module):
+    def __init__(self, in_channels, out_channels, downsample=False):
+        super(Conv2d3x3, self).__init__()
+        stride = 2 if downsample else 1
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                              padding=1, stride=stride)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+# SHARED CONVOLUTIONAL ENCODER
+class SharedConvolutionalEncoder(nn.Module):
+    def __init__(self, nonlinearity):
+        super(SharedConvolutionalEncoder, self).__init__()
+        self.nonlinearity = nonlinearity
+
+        self.conv_layers = nn.ModuleList([
+            Conv2d3x3(in_channels=3, out_channels=32),
+            Conv2d3x3(in_channels=32, out_channels=32),
+            Conv2d3x3(in_channels=32, out_channels=32, downsample=True),
+            # shape is now (-1, 32, 32, 32)
+            Conv2d3x3(in_channels=32, out_channels=64),
+            Conv2d3x3(in_channels=64, out_channels=64),
+            Conv2d3x3(in_channels=64, out_channels=64, downsample=True),
+            # shape is now (-1, 64, 16, 16)
+            Conv2d3x3(in_channels=64, out_channels=128),
+            Conv2d3x3(in_channels=128, out_channels=128),
+            Conv2d3x3(in_channels=128, out_channels=128, downsample=True),
+            # shape is now (-1, 128, 8, 8)
+            Conv2d3x3(in_channels=128, out_channels=256),
+            Conv2d3x3(in_channels=256, out_channels=256),
+            Conv2d3x3(in_channels=256, out_channels=256, downsample=True)
+            # shape is now (-1, 256, 4, 4)
+        ])
+
+        self.bn_layers = nn.ModuleList([
+            nn.BatchNorm2d(num_features=32),
+            nn.BatchNorm2d(num_features=32),
+            nn.BatchNorm2d(num_features=32),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=256),
+            nn.BatchNorm2d(num_features=256),
+            nn.BatchNorm2d(num_features=256),
+        ])
+
+    def forward(self, x):
+        h = x.view(-1, 3, 64, 64)
+        for conv, bn in zip(self.conv_layers, self.bn_layers):
+            h = conv(h)
+            h = bn(h)
+            h = self.nonlinearity(h)
+        return h
 
 
 # PRE-POOLING FOR STATISTIC NETWORK
@@ -33,8 +113,9 @@ class PrePool(nn.Module):
 
     """
 
-    def __init__(self, n_features, n_hidden, hidden_dim, nonlinearity):
+    def __init__(self, batch_size, n_features, n_hidden, hidden_dim, nonlinearity):
         super(PrePool, self).__init__()
+        self.batch_size = batch_size
         self.n_features = n_features
 
         self.n_hidden = n_hidden
@@ -43,22 +124,15 @@ class PrePool(nn.Module):
         self.nonlinearity = nonlinearity
 
         # modules
-        self.fc_initial = nn.Linear(self.n_features, self.hidden_dim)
-        self.fc_block = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                   nonlinearity=self.nonlinearity)
-        self.fc_final = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.fc = nn.Linear(self.n_features, self.hidden_dim)
+        self.bn = nn.BatchNorm1d(self.hidden_dim)
 
-    def forward(self, x):
-        # reshape and initial affine
-        e = x.view(-1, self.n_features)
-        e = self.fc_initial(e)
+    def forward(self, h):
+        # reshape and affine
+        e = h.view(-1, self.n_features)
+        e = self.fc(e)
+        e = self.bn(e)
         e = self.nonlinearity(e)
-
-        # residual block
-        e = self.fc_block(e)
-
-        # final affine
-        e = self.fc_final(e)
 
         return e
 
@@ -78,14 +152,19 @@ class PostPool(nn.Module):
         self.nonlinearity = nonlinearity
 
         # modules
-        self.fc_block = FCResBlock(width=self.hidden_dim, n=self.n_hidden,
-                                   nonlinearity=self.nonlinearity)
+        self.fc_layers = nn.ModuleList([nn.Linear(self.hidden_dim, self.hidden_dim),
+                                        nn.Linear(self.hidden_dim, self.hidden_dim)])
+        self.bn_layers = nn.ModuleList([nn.BatchNorm1d(self.hidden_dim),
+                                        nn.BatchNorm1d(self.hidden_dim)])
 
         self.fc_params = nn.Linear(self.hidden_dim, 2 * self.c_dim)
         self.bn_params = nn.BatchNorm1d(1, eps=1e-3, momentum=1e-2)
 
     def forward(self, e):
-        e = self.fc_block(e)
+        for fc, bn in zip(self.fc_layers, self.bn_layers):
+            e = fc(e)
+            e = bn(e)
+            e = self.nonlinearity(e)
 
         # affine transformation to parameters
         e = self.fc_params(e)
@@ -120,13 +199,13 @@ class StatisticNetwork(nn.Module):
         self.nonlinearity = nonlinearity
 
         # modules
-        self.prepool = PrePool(self.n_features, self.n_hidden,
-                               self.hidden_dim, self.nonlinearity)
+        self.prepool = PrePool(self.batch_size, self.n_features,
+                               self.n_hidden, self.hidden_dim, self.nonlinearity)
         self.postpool = PostPool(self.n_hidden, self.hidden_dim,
                                  self.c_dim, self.nonlinearity)
 
-    def forward(self, x):
-        e = self.prepool(x)
+    def forward(self, h):
+        e = self.prepool(h)
         e = self.pool(e)
         e = self.postpool(e)
         return e
@@ -137,12 +216,10 @@ class StatisticNetwork(nn.Module):
         return e
 
 
-# INFERENCE NETWORK q(z|x, z, c)
 class InferenceNetwork(nn.Module):
     """
-
+    Inference network q(z|h, z, c) gives approximate posterior over latent variables.
     """
-
     def __init__(self, batch_size, sample_size, n_features,
                  n_hidden, hidden_dim, c_dim, z_dim, nonlinearity):
         super(InferenceNetwork, self).__init__()
@@ -159,24 +236,22 @@ class InferenceNetwork(nn.Module):
         self.nonlinearity = nonlinearity
 
         # modules
-        self.fc_x = nn.Linear(self.n_features, self.hidden_dim)
+        self.fc_h = nn.Linear(self.n_features, self.hidden_dim)
         self.fc_c = nn.Linear(self.c_dim, self.hidden_dim)
         self.fc_z = nn.Linear(self.z_dim, self.hidden_dim)
 
-        self.fc_block1 = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                    nonlinearity=self.nonlinearity)
-        self.fc_block2 = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                    nonlinearity=self.nonlinearity)
+        self.fc_res_block = FCResBlock(dim=self.hidden_dim, n=self.n_hidden,
+                                       nonlinearity=self.nonlinearity, batch_norm=True)
 
         self.fc_params = nn.Linear(self.hidden_dim, 2 * self.z_dim)
         self.bn_params = nn.BatchNorm1d(1, eps=1e-3, momentum=1e-2)
 
-    def forward(self, x, z, c):
-        # combine x, z, and c
-        # embed x
-        ex = x.view(-1, self.n_features)
-        ex = self.fc_x(ex)
-        ex = ex.view(self.batch_size, self.sample_size, self.hidden_dim)
+    def forward(self, h, z, c):
+        # combine h, z, and c
+        # embed h
+        eh = h.view(-1, self.n_features)
+        eh = self.fc_h(eh)
+        eh = eh.view(self.batch_size, self.sample_size, self.hidden_dim)
 
         # embed z if we have more than one stochastic layer
         if z is not None:
@@ -184,20 +259,19 @@ class InferenceNetwork(nn.Module):
             ez = self.fc_z(ez)
             ez = ez.view(self.batch_size, self.sample_size, self.hidden_dim)
         else:
-            ez = Variable(torch.zeros(ex.size()).cuda())
+            ez = Variable(torch.zeros(eh.size()).cuda())
 
         # embed c and expand for broadcast addition
         ec = self.fc_c(c)
-        ec = ec.view(self.batch_size, 1, self.hidden_dim).expand_as(ex)
+        ec = ec.view(self.batch_size, 1, self.hidden_dim).expand_as(eh)
 
         # sum and reshape
-        e = ex + ez + ec
+        e = eh + ez + ec
         e = e.view(self.batch_size * self.sample_size, self.hidden_dim)
         e = self.nonlinearity(e)
 
-        # residual blocks
-        e = self.fc_block1(e)
-        e = self.fc_block2(e)
+        # for layer in self.fc_block:
+        e = self.fc_res_block(e)
 
         # affine transformation to parameters
         e = self.fc_params(e)
@@ -237,10 +311,8 @@ class LatentDecoder(nn.Module):
         self.fc_c = nn.Linear(self.c_dim, self.hidden_dim)
         self.fc_z = nn.Linear(self.z_dim, self.hidden_dim)
 
-        self.fc_block1 = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                    nonlinearity=self.nonlinearity)
-        self.fc_block2 = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                    nonlinearity=self.nonlinearity)
+        self.fc_res_block = FCResBlock(dim=self.hidden_dim, n=self.n_hidden,
+                                       nonlinearity=self.nonlinearity, batch_norm=True)
 
         self.fc_params = nn.Linear(self.hidden_dim, 2 * self.z_dim)
         self.bn_params = nn.BatchNorm1d(1, eps=1e-3, momentum=1e-2)
@@ -264,9 +336,8 @@ class LatentDecoder(nn.Module):
         e = e.view(-1, self.hidden_dim)
         e = self.nonlinearity(e)
 
-        # residual blocks
-        e = self.fc_block1(e)
-        e = self.fc_block2(e)
+        # for layer in self.fc_block:
+        e = self.fc_res_block(e)
 
         # affine transformation to parameters
         e = self.fc_params(e)
@@ -286,7 +357,6 @@ class ObservationDecoder(nn.Module):
     """
 
     """
-
     def __init__(self, batch_size, sample_size, n_features,
                  n_hidden, hidden_dim, c_dim, n_stochastic, z_dim,
                  nonlinearity):
@@ -304,14 +374,51 @@ class ObservationDecoder(nn.Module):
 
         self.nonlinearity = nonlinearity
 
+        # shared learnable log variance parameter
+        self.logvar = nn.Parameter(torch.randn(1, 3, 64, 64).cuda())
+
         # modules
         self.fc_zs = nn.Linear(self.n_stochastic * self.z_dim, self.hidden_dim)
         self.fc_c = nn.Linear(self.c_dim, self.hidden_dim)
 
-        self.fc_block = FCResBlock(width=self.hidden_dim, n=self.n_hidden - 1,
-                                   nonlinearity=self.nonlinearity)
+        self.fc_initial = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.fc_linear = nn.Linear(self.hidden_dim, self.n_features)
 
-        self.fc_params = nn.Linear(self.hidden_dim, 2 * self.n_features)
+        self.conv_layers = nn.ModuleList([
+            Conv2d3x3(in_channels=256, out_channels=256),
+            Conv2d3x3(in_channels=256, out_channels=256),
+            nn.ConvTranspose2d(in_channels=256, out_channels=256,
+                               kernel_size=2, stride=2),
+            Conv2d3x3(in_channels=256, out_channels=128),
+            Conv2d3x3(in_channels=128, out_channels=128),
+            nn.ConvTranspose2d(in_channels=128, out_channels=128,
+                               kernel_size=2, stride=2),
+            Conv2d3x3(in_channels=128, out_channels=64),
+            Conv2d3x3(in_channels=64, out_channels=64),
+            nn.ConvTranspose2d(in_channels=64, out_channels=64,
+                               kernel_size=2, stride=2),
+            Conv2d3x3(in_channels=64, out_channels=32),
+            Conv2d3x3(in_channels=32, out_channels=32),
+            nn.ConvTranspose2d(in_channels=32, out_channels=32,
+                               kernel_size=2, stride=2)
+        ])
+
+        self.bn_layers = nn.ModuleList([
+            nn.BatchNorm2d(num_features=256),
+            nn.BatchNorm2d(num_features=256),
+            nn.BatchNorm2d(num_features=256),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=128),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=64),
+            nn.BatchNorm2d(num_features=32),
+            nn.BatchNorm2d(num_features=32),
+            nn.BatchNorm2d(num_features=32),
+        ])
+
+        self.conv_mean = nn.Conv2d(32, 3, kernel_size=1)
 
     def forward(self, zs, c):
         ezs = self.fc_zs(zs)
@@ -324,10 +431,17 @@ class ObservationDecoder(nn.Module):
         e = self.nonlinearity(e)
         e = e.view(-1, self.hidden_dim)
 
-        e = self.fc_block(e)
+        e = self.fc_initial(e)
+        e = self.nonlinearity(e)
+        e = self.fc_linear(e)
+        e = e.view(-1, 256, 4, 4)
 
-        e = self.fc_params(e)
+        for conv, bn in zip(self.conv_layers, self.bn_layers):
+            e = conv(e)
+            e = bn(e)
+            e = self.nonlinearity(e)
 
-        mean, logvar = e[:, :self.n_features], e[:, self.n_features:]
+        mean = self.conv_mean(e)
+        mean = F.sigmoid(mean)
 
-        return mean, logvar
+        return mean, self.logvar.expand_as(mean)

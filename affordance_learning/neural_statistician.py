@@ -1,20 +1,22 @@
 import os
 import sys
 import torch
+import wandb
+import torchvision
+import matplotlib
 
-from synthnets import (StatisticNetwork, InferenceNetwork,
+from affordance_learning.ns_components import (SharedConvolutionalEncoder, StatisticNetwork, InferenceNetwork,
                        LatentDecoder, ObservationDecoder)
 from torch.autograd import Variable
 from torch import nn
 from torch.nn import functional as F, init
-
 try:
-    from utils import (kl_diagnormal_diagnormal, kl_diagnormal_stdnormal,
+    from affordance_learning.utils import (kl_diagnormal_diagnormal, kl_diagnormal_stdnormal,
                        gaussian_log_likelihood)
 except ModuleNotFoundError:
     # put parent directory in path for utils
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-    from utils import (kl_diagnormal_diagnormal, kl_diagnormal_stdnormal,
+    from affordance_learning.utils import (kl_diagnormal_diagnormal, kl_diagnormal_stdnormal,
                        gaussian_log_likelihood)
 
 
@@ -59,6 +61,9 @@ class Statistician(nn.Module):
         self.nonlinearity = nonlinearity
 
         # modules
+        # convolutional encoder
+        self.shared_convolutional_encoder = SharedConvolutionalEncoder(self.nonlinearity)
+
         # statistic network
         statistic_args = (self.batch_size, self.sample_size, self.n_features,
                           self.n_hidden_statistic, self.hidden_dim_statistic,
@@ -69,12 +74,10 @@ class Statistician(nn.Module):
                   self.n_hidden, self.hidden_dim, self.c_dim, self.z_dim,
                   self.nonlinearity)
         # inference networks
-        # one for each stochastic layer
         self.inference_networks = nn.ModuleList([InferenceNetwork(*z_args)
                                                  for _ in range(self.n_stochastic)])
 
         # latent decoders
-        # again, one for each stochastic layer
         self.latent_decoders = nn.ModuleList([LatentDecoder(*z_args)
                                               for _ in range(self.n_stochastic)])
 
@@ -95,16 +98,22 @@ class Statistician(nn.Module):
             print()
 
     def forward(self, x):
+        # convolutional encoder
+        h = self.shared_convolutional_encoder(x)
+
         # statistic network
-        c_mean, c_logvar = self.statistic_network(x)
-        c = self.reparameterize_gaussian(c_mean, c_logvar)
+        c_mean, c_logvar = self.statistic_network(h)
+        if self.training:
+            c = self.reparameterize_gaussian(c_mean, c_logvar)
+        else:  # sampling conditioned on inputs
+            c = c_mean
 
         # inference networks
         qz_samples = []
         qz_params = []
         z = None
         for inference_network in self.inference_networks:
-            z_mean, z_logvar = inference_network(x, z, c)
+            z_mean, z_logvar = inference_network(h, z, c)
             qz_params.append([z_mean, z_logvar])
             z = self.reparameterize_gaussian(z_mean, z_logvar)
             qz_samples.append(z)
@@ -126,16 +135,34 @@ class Statistician(nn.Module):
             (qz_params, pz_params),
             (x, x_mean, x_logvar)
         )
+        if not self.training:
+            return c, zs, x
 
         return outputs
+
+    def show_reconstruction(self, input, output):
+        c_outputs, z_outputs, x_outputs = output
+        pil_out = torchvision.transforms.functional.to_pil_image(x_outputs[0][0][0])
+        pil_in = torchvision.transforms.functional.to_pil_image(input[0][0][0])
+
+        image_recon = wandb.Image(
+            pil_out,
+            caption="Reconstruction"
+        )
+        image_in = wandb.Image(
+            pil_in,
+            caption="Input"
+        )
+
+        wandb.log({"image_in_step_0": image_in,"reconstruction": image_recon})
+        return
 
     def loss(self, outputs, weight):
         c_outputs, z_outputs, x_outputs = outputs
 
         # 1. Reconstruction loss
         x, x_mean, x_logvar = x_outputs
-        recon_loss = gaussian_log_likelihood(x.view(-1, self.n_features),
-                                             x_mean, x_logvar)
+        recon_loss = gaussian_log_likelihood(x.view(-1, 3, 64, 64), x_mean, x_logvar, clip=True)
         recon_loss /= (self.batch_size * self.sample_size)
 
         # 2. KL Divergence terms
@@ -168,11 +195,11 @@ class Statistician(nn.Module):
 
         return loss, vlb
 
-    def step(self, batch, alpha, optimizer, clip_gradients=True):
+    def step(self, inputs, alpha, optimizer, clip_gradients=True):
         assert self.training is True
 
-        inputs = Variable(batch.cuda())
         outputs = self.forward(inputs)
+        self.show_reconstruction(inputs, outputs)
         loss, vlb = self.loss(outputs, weight=(alpha + 1))
 
         # perform gradient update
@@ -184,8 +211,46 @@ class Statistician(nn.Module):
                     param.grad.data = param.grad.data.clamp(min=-0.5, max=0.5)
         optimizer.step()
 
-        # output variational lower bound
-        return vlb.data[0]
+        # output variational lower bound for batch
+        return vlb.item()
+
+    def sample(self):
+        c = torch.randn(self.batch_size, self.c_dim)
+
+        # latent decoders
+        pz_samples = []
+        z = None
+        for i, latent_decoder in enumerate(self.latent_decoders):
+            z_mean, z_logvar = latent_decoder(z, c)
+            z = self.reparameterize_gaussian(z_mean, z_logvar)
+            pz_samples.append(z)
+
+        # observation decoder
+        zs = torch.cat(pz_samples, dim=1)
+        x_mean, x_logvar = self.observation_decoder(zs, c)
+
+        return x_mean
+
+    def sample_conditioned(self, inputs):
+        h = self.shared_convolutional_encoder(inputs)
+        c, _ = self.statistic_network(h)
+
+        # latent decoders
+        pz_samples = []
+        z = None
+        for i, latent_decoder in enumerate(self.latent_decoders):
+            z_mean, z_logvar = latent_decoder(z, c)
+            if i == 0:
+                z_mean = z_mean.repeat(self.sample_size, 1)
+                z_logvar = z_logvar.repeat(self.sample_size, 1)
+            z = self.reparameterize_gaussian(z_mean, z_logvar)
+            pz_samples.append(z)
+
+        # observation decoder
+        zs = torch.cat(pz_samples, dim=1)
+        x_mean, x_logvar = self.observation_decoder(zs, c)
+
+        return x_mean
 
     def save(self, optimizer, path):
         torch.save({
@@ -201,7 +266,7 @@ class Statistician(nn.Module):
 
     @staticmethod
     def weights_init(m):
-        if isinstance(m, nn.Linear):
+        if isinstance(m, (nn.Linear, nn.Conv2d)):
             init.xavier_normal(m.weight.data, gain=init.calculate_gain('relu'))
             init.constant(m.bias.data, 0)
         elif isinstance(m, nn.BatchNorm1d):
