@@ -12,6 +12,13 @@ from memory_graph.init_concept_space import ObjectConcept
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import torch
+import torch.nn as nn
+from torchvision import models
+
+#original_model = models.alexnet(pretrained=True)
+resnet = models.resnet50(pretrained=True)
+
 
 class SegmentAnythingObjectExtractor(object):
 
@@ -34,35 +41,60 @@ class SegmentAnythingObjectExtractor(object):
         self.transform = transforms.ToTensor()
         self.pil_transform = transforms.Compose([
             transforms.ToPILImage(),
-            transforms.Resize(128, interpolation=Image.CUBIC),
+            transforms.Resize(128, interpolation=Image.Resampling.BICUBIC),
             transforms.ToTensor()])
         self.im_height = 64
         self.im_width = 64
-        self.encoder = models.vgg16(pretrained=True).to(device).eval()
+        # Remove the classification layer (the last layer)
+        self.resnet_encoder = torch.nn.Sequential(*list(resnet.children())[:-1])
+        self.resnet_encoder = self.resnet_encoder.to(device).eval()
 
-    def extract_objects(self, frame):
+        self.resnet_transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+
+        self.linear_layer_resnet = torch.nn.Linear(2048, 512).to(device)
+        self.linear_layer_squeeze = torch.nn.Linear(1000, 16).to(device)
+
+    def pass_through_resnet(self, obj_tensor):
+        features = self.resnet_encoder(obj_tensor)
+        # Reduce the dimensionality to 512
+        reduced_features = torch.nn.functional.relu(features)  # Apply ReLU activation
+        reduced_features = torch.nn.functional.adaptive_avg_pool2d(reduced_features, (1, 1))
+        reduced_features = self.linear_layer_resnet(reduced_features.view(-1, 2048))
+        return reduced_features
+
+    def extract_objects(self, frame, use_model='resnet'):
         objects = []
+        objects_resnet = []
 
         #frame_reduced = self.pil_transform(frame).permute(1, 2, 0).detach().numpy()
         frame_reduced = cv2.resize(frame, dsize=(self.im_height, self.im_width), interpolation=cv2.INTER_CUBIC)
-        masks = self.mask_generator.generate(frame_reduced)
+        with torch.no_grad():
+            masks = self.mask_generator.generate(frame_reduced)
         masks = masks[:self.no_objects]
         for mask in masks:
             mask_inverted = np.invert(mask['segmentation']).astype(int)
             mask_arr = np.stack((mask_inverted,) * 3, axis=-1)
             masked = np.where(mask_arr == 0, frame_reduced, 0)
-            # import matplotlib.pyplot as plt
-            # plt.imshow(masked)
-            # plt.show()
-            tensor = self.transform(masked).float()
+            if use_model == 'resnet':
+                tensor = self.resnet_transform(masked).float()
             objects.append(tensor)
 
         obj_tensor = torch.stack(objects).to(device)
-        encoded_objs = self.encoder(obj_tensor)
-        transform = transforms.ToTensor()
-        tensor_img_reduced = transform(frame_reduced).to(device)
-        encoded_state = self.encoder(tensor_img_reduced.unsqueeze(0))
-        encoded_objs = encoded_objs.detach()
+        if use_model == 'resnet':
+            with torch.no_grad():
+                reduced_features = self.pass_through_resnet(obj_tensor)
+                tensor_img_reduced = self.resnet_transform(frame_reduced).float().to(device)
+                encoded_state = self.pass_through_resnet(tensor_img_reduced.unsqueeze(0))
+
+        encoded_objs = reduced_features
+
         if len(masks) < self.no_objects:
             encoded_objs = F.pad(input=encoded_objs, pad=(0, 0, self.no_objects-len(masks), 0), mode='constant', value=0)
 

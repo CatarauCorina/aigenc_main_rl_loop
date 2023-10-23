@@ -22,6 +22,7 @@ from co_segment_anything.sam_utils import SegmentAnythingObjectExtractor
 from create.create_game.settings import CreateGameSettings
 from memory_graph.gds_concept_space import ConceptSpaceGDS
 from memory_graph.memory_utils import WorkingMemory
+from affordance_learning.action_observation.utils import ActionObservation
 
 envs_to_run = []
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,8 +43,21 @@ class TrainModel(object):
         self.masked= masked
 
         self.object_extractor = SegmentAnythingObjectExtractor()
-        self.concept_space = ConceptSpaceGDS(memory_type="wmtest")
-        self.wm = WorkingMemory()
+        self.action_embedder = ActionObservation()
+        self.concept_space = ConceptSpaceGDS(memory_type="afftest")
+        self.wm = WorkingMemory(which_db='afftest')
+        self.use_actions_repr = True
+
+    def get_current_state_graph(self, observation, objects_interacting_frames,  episode_id, timestep):
+        current_screen_objects, encoded_state = self.object_extractor.extract_objects(observation)
+        state_id = self.wm.add_to_memory(encoded_state, current_screen_objects, episode_id, timestep)
+        action_tool_ids = self.wm.add_object_action_repr(objects_interacting_frames, state_id)
+        return current_screen_objects, encoded_state, state_id, action_tool_ids
+
+    def compute_effect(self, st, st_plus_1, reward):
+        difference = st_plus_1 - st
+        combined_effect = torch.cat([difference.squeeze(0), torch.tensor(reward).unsqueeze(0).to(device)])
+        return combined_effect
 
     def train(self, target_net, policy_net, memory, params, optimizer, writer, max_timesteps=30):
         episode_durations = []
@@ -61,37 +75,62 @@ class TrainModel(object):
             # Initialize the environment and state
             obs = self.env.reset()
             #state = self.process_frames(obs)
-            state, encoded_state = self.object_extractor.extract_objects(obs)
             rew_ep = 0
             loss_ep = 0
             losses = []
             timestep = 0
+            aff_id = None
+            state_id = None
+            # current_screen, encoded_state = self.object_extractor.extract_objects(obs)
+            encoded_inventory, objects_interacting_frames = self.action_embedder.get_inventory_embeddings(self.env.inventory, self.object_extractor)
+            # state_id = self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep)
+            # aff_id_int = self.wm.add_object_action_repr(objects_interacting_frames, state_id, 0,
+            #                                             [0, 0], timestep, 0)
+            current_screen, encoded_state_t, state_id, action_tool_ids = self.get_current_state_graph(
+                obs, objects_interacting_frames,
+                episode_id, timestep
+            )
             for t in count():
                 # Select and perform an action
-                timestep += 1
-                action, steps_done, mask, inventory = self.select_action(state, params, policy_net, len(self.env.allowed_actions), steps_done)
+                output_tensor = torch.cat((current_screen, encoded_inventory.unsqueeze(0).unsqueeze(0)), dim=2)
+                if not self.use_actions_repr:
+                    action, steps_done, mask, inventory = self.select_action(current_screen, params, policy_net, len(self.env.allowed_actions), steps_done)
+                else:
+                    action, steps_done, mask, inventory = self.select_action(output_tensor, params, policy_net, len(self.env.allowed_actions), steps_done)
 
                 returned_state, reward, done, _ = self.env.step(action[0])
-                self.writer.log({"Action taken": action[0][0]})
-                reward = torch.tensor([reward], device=device)
+                inventory_item_applied = self.env.inventory.item(action[0][0])
+                position_applied = [action[0][1], action[0][2]]
+                try:
+                    r = reward.item()
+                except:
+                    r = reward
+                    print(reward)
 
-                rew_ep += reward.item()
-                #current_screen = self.process_frames(screen)
-                current_screen, encoded_state = self.object_extractor.extract_objects(returned_state)
+                aff_id = self.wm.match_action_affordance(action_tool_ids, inventory_item_applied, position_applied, r, timestep)
+                self.wm.concept_space.match_state_add_aff(state_id, aff_id)
+
+                self.writer.log({"Action taken": action[0][0]})
+                reward = torch.tensor([r], device=device)
+
+                rew_ep += r
+                #current_screen, encoded_state = self.object_extractor.extract_objects(returned_state)
+                current_screen, encoded_state_t_plus_1, state_id, action_tool_ids = self.get_current_state_graph(
+                    returned_state, objects_interacting_frames,
+                    episode_id, timestep+1
+                )
+                affordance_effect = self.compute_effect(encoded_state_t, encoded_state_t_plus_1, r)
                 episode_memory.append(current_screen)
-                # ids = self.concept_space.add_data('ObjectConcept')
-                # self.concept_space.update_node_by_id(ids['elementId(n)'][0],current_screen.squeeze(0).squeeze(0)[0].tolist())
-                # self.concept_space.add_state_with_objects(encoded_state, current_screen, episode_id, timestep)
-                self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep, reward)
+
                 if not done:
                     next_state = current_screen
                 else:
                     next_state = None
 
                 # Store the transition in memory
-                self.wm.compute_attention(timestep, episode_id)
+                #self.wm.compute_attention(timestep, episode_id)
                 if next_state is not None:
-                    memory.push(state, action[0], next_state, reward, mask, inventory)
+                    memory.push(current_screen, action[0], next_state, reward, mask, inventory)
 
                 # Move to the next state
                 state = next_state
@@ -109,6 +148,13 @@ class TrainModel(object):
                     # self.writer.log({'states': episode_frames})
 
                     break
+                timestep += 1
+                #state_id = self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep)
+                #action_tool_ids = self.wm.add_object_action_repr(objects_interacting_frames, state_id)
+
+                if aff_id is not None and state_id is not None:
+                    self.wm.concept_space.match_state_add_aff_outcome(state_id, aff_id)
+                    self.wm.concept_space.set_property(aff_id, 'Affordance', 'outcome', affordance_effect.tolist())
                 # Update the target network, copying all weights and biases in DQN
             if i_episode % params['target_update'] == 0:
                 target_net.load_state_dict(policy_net.state_dict())
