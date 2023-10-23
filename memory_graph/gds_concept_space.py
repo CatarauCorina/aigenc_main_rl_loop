@@ -26,15 +26,20 @@ class ConceptSpaceGDS:
             )
             return pd.DataFrame([r.values() for r in result], columns=result.keys())
 
-    def set_property(self, object_id, node_type,property, property_value):
-        with self.driver.session() as session:
-            result = session.run(
-                f"""
+    def set_property(self, object_id, node_type,property, property_value, is_string=False):
+        query_string = f"""
                            USE {self.memory_type}
                            MATCH (n:{node_type}) where elementId(n)="{object_id}"
                            SET n.{property}={property_value}
                        """
-            )
+        if is_string:
+            query_string = f"""
+                           USE {self.memory_type}
+                           MATCH (n:{node_type}) where elementId(n)="{object_id}"
+                           SET n.{property}="{property_value}"
+                       """
+        with self.driver.session() as session:
+            result = session.run(query_string)
             return
 
     def set_memory(self):
@@ -53,7 +58,7 @@ class ConceptSpaceGDS:
             self.match_state_add_node(state_id, obj_id['elementId(n)'][0])
         return tensor_list
 
-    def add_state_with_objects(self, state_encoding, objects, episode_id, time, reward):
+    def add_state_with_objects(self, state_encoding, episode_id, time):
         with self.driver.session() as session:
             result = session.run(
                 f"""
@@ -62,7 +67,6 @@ class ConceptSpaceGDS:
                 CREATE
                     (st:StateT {{
                                 state_enc: {state_encoding.tolist()[0]}, 
-                                reward:{reward}, 
                                 episode_id:toInteger(split("{episode_id}",":")[2])
                             }}
                     ) 
@@ -71,7 +75,7 @@ class ConceptSpaceGDS:
             )
             result_state_creation = pd.DataFrame([r.values() for r in result], columns=result.keys())
         state_id = result_state_creation['elementId(st)'][0]
-        return objects, state_id
+        return state_id
 
     def match_state_add_node(self, state_id, node_id):
         with self.driver.session() as session:
@@ -83,6 +87,54 @@ class ConceptSpaceGDS:
                 """
             )
             return result
+
+    def match_obj_add_action(self, obj_id, action_id):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                            USE {self.memory_type}
+                            MATCH (o:ObjectConcept), (a:ActionRepr) WHERE elementId(o) = "{obj_id}" and elementId(a) ="{action_id}"
+                            MERGE (o)-[:`contribute`]->(a)
+                            """
+            )
+            return result
+
+    def match_state_add_aff(self, state_id, node_id):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                 USE {self.memory_type}
+                 MATCH (s:StateT), (n:Affordance) WHERE elementId(s) = "{state_id}" and elementId(n) ="{node_id}"
+                 MERGE (s)-[:`influences`]->(n)
+                 """
+            )
+            return result
+
+    def match_state_add_aff_outcome(self, state_id, node_id):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                    USE {self.memory_type}
+                    MATCH (s:StateT), (n:Affordance) WHERE elementId(s) = "{state_id}" and elementId(n) ="{node_id}"
+                    MERGE (n)-[:`outcome`]->(s)
+                    """
+            )
+            return result
+
+
+    def match_action_add_aff(self, action_id, node_id):
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                 USE {self.memory_type}
+                 MATCH (act:ActionRepr), (n:Affordance) WHERE elementId(act) = "{action_id}" and elementId(n) ="{node_id}"
+                 MERGE (act)-[:`produces`]->(n)
+                 """
+            )
+            return result
+
+
+
 
     def update_node_by_id(self, node_id, value):
         with self.driver.session() as session:

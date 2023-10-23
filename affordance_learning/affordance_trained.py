@@ -1,6 +1,7 @@
 import argparse
 import os
 import torch
+import torchvision
 import time
 
 from affordance_learning.affordance_data import AffDataset
@@ -66,6 +67,51 @@ parser.add_argument('--clip-gradients', type=bool, default=True,
 args = parser.parse_args()
 
 
+class ActionEmbedder:
+
+    def __init__(self, concept_space=None):
+        n_features = 256 * 4 * 4  # output shape of convolutional encoder
+        model_kwargs = {
+            'batch_size': args.batch_size,
+            'sample_size': args.sample_size,
+            'n_features': n_features,
+            'c_dim': args.c_dim,
+            'n_hidden_statistic': args.n_hidden_statistic,
+            'hidden_dim_statistic': args.hidden_dim_statistic,
+            'n_stochastic': args.n_stochastic,
+            'z_dim': args.z_dim,
+            'n_hidden': args.n_hidden,
+            'hidden_dim': args.hidden_dim,
+            'nonlinearity': F.elu,
+            'print_vars': args.print_vars
+        }
+        model = Statistician(**model_kwargs)
+        model.cuda()
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+        cwd = os.getcwd()
+        path = os.path.join(cwd, '..', 'affordance_learning/checkpoints_ns_aff/checkpoints/ns_78.ckp')
+        checkpoint = torch.load(path)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        model.eval()
+        self.model = model
+        self.optimizer = optimizer
+        if concept_space is not None:
+            self.concept_space = concept_space
+
+    def get_action_embedding(self, data):
+        context_latent, obj_instance, recon_img = self.model(data)
+        return context_latent, obj_instance, recon_img
+
+    def add_action_to_concept_space(self, context, otype):
+        aff_context = self.concept_space.add_data('ActionRepr')
+        aff_id = aff_context['elementId(n)'][0]
+        self.concept_space.set_property(aff_id, 'ActionRepr', 'val', context.squeeze(0).tolist())
+        self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
+        return aff_id
+
+
+
 def get_aff_emb_context_and_instance(model, optimizer, object_type, datasets):
     cwd = os.getcwd()
     path = os.path.join(cwd, 'checkpoints_ns_aff/checkpoints/ns_78.ckp')
@@ -124,7 +170,7 @@ def add_test_data():
     model = Statistician(**model_kwargs)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    variation_nr = 20
+    variation_nr = 1
     ds_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "create_aff_ds\\train")
     object_types = os.listdir(ds_path)
     contexts = {}
@@ -132,9 +178,15 @@ def add_test_data():
         #contexts[otype] = {'list': [], 'dist': None}
         for i in range(variation_nr):
             context, inst, img = get_aff_emb_context_and_instance(model, optimizer, otype, datasets)
+            # recog_img = img.cpu().squeeze(0)
+            # for img in recog_img:
+            #     img_plot = torchvision.transforms.functional.to_pil_image(img)
+            #     import matplotlib.pyplot as plt
+            #     plt.imshow(img_plot)
+            #     plt.show()
             aff_context = concept_space.add_data('ActionRepr')
             aff_id = aff_context['elementId(n)'][0]
-            concept_space.set_property(aff_id, 'ActionRepr', 'val', context.squeeze(0).tolist())
+            concept_space.set_property(aff_id, 'ActionRepr', 'val', inst[3].tolist())
             concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
 
 
@@ -142,10 +194,11 @@ def add_test_data():
     return contexts
 
 def view_stats_of_data():
-    wm = WorkingMemory(which_db="afftest")
-    name = wm.create_query_graph('afftest', 'ActionRepr', ['val'])
-    clusters = wm.compute_action_clusters(f'"{name}"')
-    return clusters
+    add_test_data()
+    # wm = WorkingMemory(which_db="afftest")
+    # name = wm.create_query_graph('afftest', 'ActionRepr', ['val'])
+    # clusters = wm.compute_action_clusters(f'"{name}"')
+    # return clusters
 
 
 

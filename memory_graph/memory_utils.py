@@ -1,4 +1,5 @@
 import os
+import torch
 from graphdatascience import GraphDataScience
 import uuid
 import numpy as np
@@ -22,6 +23,11 @@ class WorkingMemory:
 
     def gds_init_project_catalog_objects(self):
         project_name = self.create_query_graph(self.default_name,'ObjectConcept', ['value'])
+        print(project_name)
+        return project_name
+
+    def gds_init_project_catalog_action_repr(self):
+        project_name = self.create_query_graph(self.default_name, 'ActionRepr', ['val'])
         print(project_name)
         return project_name
 
@@ -115,8 +121,7 @@ class WorkingMemory:
         if use_best_k:
             best_k = self.compute_silhouette_best_k(project_name, node_property)
 
-        k_clustering_result = self.gds.run_cypher(
-            f"""
+        query_string = f"""
             CALL gds.beta.kmeans.stream({project_name}, {{
             nodeProperty: '{node_property}',
             k: {best_k},
@@ -124,10 +129,12 @@ class WorkingMemory:
             numberOfRestarts:5
             }})
             YIELD nodeId, communityId,distanceFromCentroid
-            RETURN gds.util.asNode(nodeId).obj_type AS otype, communityId, distanceFromCentroid
-            ORDER BY communityId, otype ASC, distanceFromCentroid
+            RETURN gds.util.asNode(nodeId).obj_type AS otype, gds.util.asNode(nodeId).{node_property} as emb, communityId, distanceFromCentroid
+            ORDER BY communityId, otype ASC, emb, distanceFromCentroid
             """
-        )
+        print(query_string)
+
+        k_clustering_result = self.gds.run_cypher(query_string)
         return k_clustering_result
 
     def compute_save_wm_clusters(self):
@@ -161,59 +168,153 @@ class WorkingMemory:
         )
         return centroids
 
-    def check_if_node_exists(self, embedding, similarity_th=0.5, similarity_method='euclidean'):
+    def check_if_node_exists(self, embedding, similarity_th=0.5, similarity_method='euclidean', node_type='ObjectConcept'):
         similar_objects = self.gds.run_cypher(
             f"""
-                match(no:ObjectConcept) with 
+                match(no:{node_type}) with 
                     no, gds.similarity.{similarity_method}(
                         {embedding},
                         no.value
                     ) as sim
                 where sim > {similarity_th}
-                return elementId(no),no.parent_id_state, sim order by sim limit 2
+                return elementId(no),no.parent_id_state, sim order by sim desc limit 2
             """
         )
         return similar_objects
 
-    def add_to_memory(self, encoded_state, current_screen, episode_id, timestep, reward):
+    def add_affordance(self, position, reward, time_applied):
+        add = self.gds.run_cypher(
+            f"""
+                MERGE (aff:Affordance {{ position:{position},reward:{reward},t:{time_applied} }})
+                RETURN elementId(aff)
+            """
+        )
+        return add
+
+    def add_to_memory(self, encoded_state, current_screen, episode_id, timestep):
+        self.init_project_catalogs(init_action=False)
+        state_id = self.concept_space.add_state_with_objects(
+            encoded_state,
+            episode_id,
+            timestep,
+        )
+        state_split = int(state_id.split(':')[2])
+        print(state_split)
+        for obj in current_screen.squeeze(0).squeeze(0):
+            if torch.count_nonzero(obj).item() != 0:
+                obj_list = obj.tolist()
+                self.check_object_exists_and_add(obj_list, state_id)
+        self.concept_space.close()
+        return state_id
+
+    def init_project_catalogs(self, init_action=False):
         try:
-            project_name = self.gds_init_project_catalog_objects()
+            project_name_obj = self.gds_init_project_catalog_objects()
         except:
             obj = self.concept_space.add_data('ObjectConcept')
-            random_value = list(np.random.uniform(low=0.1, high=1, size=(1000,)))
-            self.concept_space.update_node_by_id(obj['elementId(n)'][0],  random_value)
+            random_value = list(np.random.uniform(low=0.1, high=1, size=(16,)))
+            self.concept_space.update_node_by_id(obj['elementId(n)'][0], random_value)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'alpha', 0.1)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'all_att_values', [])
 
             project_name = self.gds_init_project_catalog_objects()
-        objects, state_id = self.concept_space.add_state_with_objects(
-            encoded_state,
-            current_screen,
-            episode_id,
-            timestep,
-            reward.item()
-        )
+        if init_action:
+            try:
+                project_name_action = self.gds_init_project_catalog_action_repr()
+            except:
+                obj = self.concept_space.add_data('ActionRepr')
+                random_value = list(np.random.uniform(low=0.1, high=1, size=(16,)))
+                self.concept_space.update_node_by_id(obj['elementId(n)'][0], random_value)
+                self.concept_space.set_property(obj['elementId(n)'][0], 'ActionRepr', 'obj_type', "init", is_string=True)
+
+                project_name = self.gds_init_project_catalog_objects()
+
+    def add_objects_action_set(self, objects, action_repr, state_id):
         state_split = int(state_id.split(':')[2])
         print(state_split)
         for obj in objects.squeeze(0).squeeze(0):
-            obj_list = obj.tolist()
-            similar_objects = self.check_if_node_exists(obj_list)
-            if not similar_objects.empty:
-                state_ids_list = list(similar_objects['no.parent_id_state'][0]) + [state_split]
-                self.concept_space.set_property(similar_objects['elementId(no)'][0], 'ObjectConcept', 'parent_id_state', f'apoc.coll.toSet({state_ids_list})')
-                obj_id = similar_objects['elementId(no)'][0]
-            else:
-                obj = self.concept_space.add_data('ObjectConcept')
-                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'parent_id_state', [state_split])
-                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'all_att_values', [])
-                self.concept_space.update_node_by_id(obj['elementId(n)'][0], obj_list)
-                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
-                self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'alpha', 0.1)
-                obj_id = obj['elementId(n)'][0]
-            self.concept_space.match_state_add_node(state_id, obj_id)
+            if torch.count_nonzero(obj) != 0:
+                obj_list = obj.tolist()
+                obj_id = self.check_object_exists_and_add(obj_list, state_split)
         self.concept_space.close()
-        return
+
+    def check_object_exists_and_add(self, obj_list, state_split):
+        state_id = int(state_split.split(':')[2])
+        similar_objects = self.check_if_node_exists(obj_list, similarity_th=0.8)
+        if not similar_objects.empty:
+            state_ids_list = list(similar_objects['no.parent_id_state'][0]) + [state_id]
+            self.concept_space.set_property(similar_objects['elementId(no)'][0], 'ObjectConcept', 'parent_id_state',
+                                            f'apoc.coll.toSet({state_ids_list})')
+            obj_id = similar_objects['elementId(no)'][0]
+        else:
+            obj = self.concept_space.add_data('ObjectConcept')
+            self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'parent_id_state',
+                                            [state_id])
+            self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'all_att_values', [])
+            self.concept_space.update_node_by_id(obj['elementId(n)'][0], obj_list)
+            self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
+            self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'alpha', 0.1)
+            obj_id = obj['elementId(n)'][0]
+        self.concept_space.match_state_add_node(state_split, obj_id)
+        return obj_id
+
+    def check_action_repr_exists_and_add(self, action_repr, state_id, otype):
+        similar_action_repr = self.check_if_node_exists(action_repr, node_type='ActionRepr', similarity_th=0.6)
+        if not similar_action_repr.empty:
+            state_ids_list = list(similar_action_repr['no.parent_id_state'][0]) + [state_id]
+            self.concept_space.set_property(similar_action_repr['elementId(no)'][0], 'ActionRepr', 'parent_id_state',
+                                            f'apoc.coll.toSet({state_ids_list})')
+            action_id = similar_action_repr['elementId(no)'][0]
+        else:
+            action_node = self.concept_space.add_data('ActionRepr')
+            action_id = action_node['elementId(n)'][0]
+            self.concept_space.set_property(action_id, 'ActionRepr', 'value', action_repr)
+            self.concept_space.set_property(action_id, 'ActionRepr', 'obj_type', otype, is_string=True)
+            self.concept_space.set_property(action_id, 'ActionRepr', 'parent_id_state', [state_id])
+            self.concept_space.set_property(action_id, 'ActionRepr', 'all_att_values', [])
+
+            self.concept_space.set_property(action_id, 'ActionRepr', 'att', 0.01)
+            self.concept_space.set_property(action_id, 'ActionRepr', 'alpha', 0.1)
+
+        return action_id
+
+    def add_object_action_repr(self, dict_interactions, state_id):
+        self.init_project_catalogs(init_action=True)
+        action_ids_tool_ids = {}
+
+        state_split = int(state_id.split(':')[2])
+        print(state_split)
+        action_ids = []
+        for interaction in dict_interactions:
+            objects = interaction['objects_in_interaction']
+            action_repr = interaction['interaction']
+            action_id = self.check_action_repr_exists_and_add(action_repr.squeeze(0).tolist(),
+                                                              state_split, interaction['tool_label'])
+            action_ids_tool_ids[interaction['tool_id']] = action_id
+
+            for obj in objects.squeeze(0).squeeze(0):
+                if torch.count_nonzero(obj).item() != 0:
+                    obj_list = obj.tolist()
+                    obj_id = self.check_object_exists_and_add(obj_list, state_id)
+                    self.concept_space.match_obj_add_action(obj_id, action_id)
+                    action_ids.append(action_id)
+
+        self.concept_space.close()
+        return action_ids_tool_ids
+
+    def match_action_affordance(self, action_tool_ids, applied_item, position, reward, time):
+        aff_id = None
+        try:
+            action_id = action_tool_ids[applied_item]
+            aff = self.add_affordance(position, reward, time)
+            aff_id = aff['elementId(aff)'][0]
+            self.concept_space.match_action_add_aff(action_id, aff_id)
+        except:
+            print(action_tool_ids.keys())
+            print(applied_item)
+            aff_id = None
+        return aff_id
 
     def compute_attention(self, time, episode_id, omega=0.1, beta=0.6, default_alpha=0.1):
         ep_id = int(episode_id.split(':')[2])
