@@ -1,9 +1,10 @@
 import argparse
 import os
 import time
-
+import torch
+import torch.nn as nn
 from affordance_learning.affordance_data import AffDataset
-from affordance_learning.neural_statistician import Statistician
+from affordance_learning.neural_statistician import Statistician, VideoClassificationModel
 
 from torch import optim
 from torch.autograd import Variable
@@ -70,9 +71,10 @@ os.makedirs(os.path.join(args.output_dir, 'figures'), exist_ok=True)
 time_stamp = time.strftime("%d-%m-%Y-%H:%M:%S")
 
 
-def run(model, optimizer, loaders, datasets):
-    wandb_logger = Logger(f"neural_statistician_basic_images_5", project='affordance_neural_statistician')
+def run(model, classifier, optimizer, loaders, datasets):
+    wandb_logger = Logger(f"ns_only_pos_actions", project='affordance_neural_statistician_new')
     logger = wandb_logger.get_logger()
+
 
     train_dataset = datasets
     train_loader = loaders
@@ -85,26 +87,36 @@ def run(model, optimizer, loaders, datasets):
     alpha = 1
     # main training loop
     tbar = tqdm(range(args.epochs))
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     for epoch in tbar:
 
         # train step (iterate once over training data)
         model.train()
         running_vlb = 0
         for batch in train_loader:
-            inputs = Variable(batch.cuda())
+            data, data_classif, labels = batch
+            inputs = Variable(data.cuda())
+
+            labels = Variable(labels.cuda())
+
+            outputs = classifier(data)
+            _, preds = torch.max(outputs, 1)
+            loss_classif = criterion(outputs, labels)
+
             if inputs.shape[0] == args.batch_size:
-                vlb = model.step(inputs, alpha, optimizer, clip_gradients=args.clip_gradients)
+                vlb = model.step(inputs, alpha, optimizer, clip_gradients=args.clip_gradients, loss_classif=loss_classif)
                 running_vlb += vlb
                 logger.log({'VLB_batch':vlb})
+                logger.log({'Loss classif': loss_classif})
             else:
                 print(inputs.shape)
+
 
         # update running lower bound
         running_vlb /= (len(train_dataset) // args.batch_size)
         logger.log({"Running VLB": running_vlb})
 
-        s = "VLB: {:.3f}".format(running_vlb)
-        tbar.set_description(s)
 
         # reduce weight
         alpha *= 0.5
@@ -119,7 +131,7 @@ def run(model, optimizer, loaders, datasets):
 
         # checkpoint model at intervals
         if (epoch + 1) % save_interval == 0:
-            PATH = f"ns_{epoch+1}.ckp"
+            PATH = f"ns_new_{epoch+1}.ckp"
             save_path = os.path.join('checkpoints_ns_aff/','checkpoints/', PATH)
             model.save(optimizer, save_path)
 
@@ -156,10 +168,14 @@ def main():
         'print_vars': args.print_vars
     }
     model = Statistician(**model_kwargs)
+    classif_model = VideoClassificationModel(len(train_dataset.video_classes))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    classif_model = classif_model.to(device)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    run(model, optimizer, loaders, datasets)
+    run(model, classif_model, optimizer, loaders, datasets)
 
 
 if __name__ == '__main__':

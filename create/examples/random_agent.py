@@ -8,8 +8,8 @@ from create_game import CreateGameSettings
 import gym
 
 
-env = gym.make('CreateLevelPush-v0')
-env.set_settings(CreateGameSettings(max_num_steps=5))
+env = gym.make('CreateLevelBasket-v0')
+env.set_settings(CreateGameSettings(max_num_steps=9))
 
 num_iters = 10
 

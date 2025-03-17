@@ -4,6 +4,7 @@ import torch
 import wandb
 import torchvision
 import matplotlib
+from torchvision import datasets, transforms, models
 
 from affordance_learning.ns_components import (SharedConvolutionalEncoder, StatisticNetwork, InferenceNetwork,
                        LatentDecoder, ObservationDecoder)
@@ -18,6 +19,34 @@ except ModuleNotFoundError:
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
     from affordance_learning.utils import (kl_diagnormal_diagnormal, kl_diagnormal_stdnormal,
                        gaussian_log_likelihood)
+
+
+class VideoClassificationModel(nn.Module):
+    def __init__(self, num_classes, nonlinearity=F.relu):
+        super(VideoClassificationModel, self).__init__()
+        self.encoder = SharedConvolutionalEncoder(nonlinearity)
+        self.fc1 = nn.Linear(256 * 4 * 4, 512)  # Adjust based on output size of encoder
+        self.fc2 = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        # x shape: (N, T, C, H, W)
+        batch_size, sequence_length, _, _, _ = x.size()
+
+        # Process each frame independently using the encoder
+        encoded_frames = self.encoder(x)  # Reshape to (N*T, C, H, W)
+
+        # Reshape back to (N, T, features) to prepare for classification
+        encoded_frames = encoded_frames.view(batch_size, sequence_length, -1)  # (N, T, features)
+
+        # We can use the mean or max pooling over the sequence length dimension
+        pooled_features = torch.mean(encoded_frames, dim=1)  # (N, features) by averaging over T
+
+        # Feed pooled features into fully connected layers
+        x = F.relu(self.fc1(pooled_features))
+        x = self.fc2(x)
+
+        return x
+
 
 
 # Model
@@ -195,12 +224,13 @@ class Statistician(nn.Module):
 
         return loss, vlb
 
-    def step(self, inputs, alpha, optimizer, clip_gradients=True):
+    def step(self, inputs, alpha, optimizer, clip_gradients=True, loss_classif=None):
         assert self.training is True
 
         outputs = self.forward(inputs)
         self.show_reconstruction(inputs, outputs)
         loss, vlb = self.loss(outputs, weight=(alpha + 1))
+        loss = loss + loss_classif
 
         # perform gradient update
         optimizer.zero_grad()

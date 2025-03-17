@@ -1,7 +1,7 @@
 import gym
 import create.create_game
 
-env = gym.make('CreateLevelPush-v0')
+env = gym.make('CreateLevelMoving-v0')
 
 env.reset()
 

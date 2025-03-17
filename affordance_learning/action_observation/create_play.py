@@ -170,7 +170,7 @@ class CreatePlay(gym.Env):
                     data_type=self.data_type,
                     collision_radius=self.collision_radius,
                     mode='rgb_array_high')
-                new_state = np.array(new_state).astype(np.float32)
+                # new_state = np.array(new_state).astype(np.float32)
 
                 if first_touched == -1 and ft != -1:
                     first_touched = len(states) + ft
@@ -203,8 +203,8 @@ class CreatePlay(gym.Env):
         assert len(states) == self.args.create_play_len
 
         states = np.array(states)
-        if self.data_type == 'video':
-            states = (states/255.0) - 0.5
+        # if self.data_type == 'video':
+        #     states = (states/255.0) - 0.5
         #     if self.grayscale:
         #         states = np.expand_dims(states, -1)
         #
@@ -213,7 +213,7 @@ class CreatePlay(gym.Env):
         #         'actions': [0]  # Just a garbage value
         #         }
 
-        return states, 0.0, False
+        return states, 0.0, False, collision
 
 
     def seed(self, seed_id):
