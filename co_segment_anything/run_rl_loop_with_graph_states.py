@@ -44,8 +44,9 @@ class TrainModel(object):
 
         self.object_extractor = SegmentAnythingObjectExtractor()
         self.action_embedder = ActionObservation()
-        self.concept_space = ConceptSpaceGDS(memory_type="afftest")
-        self.wm = WorkingMemory(which_db='afftest')
+        #self.concept_space = ConceptSpaceGDS(memory_type="afftest")
+        self.wm = WorkingMemory(which_db='workingmemory')
+        self.ltm = WorkingMemory(which_db="longtermmemory")
         self.use_actions_repr = True
 
     def get_current_state_graph(self, observation, objects_interacting_frames,  episode_id, timestep):
@@ -68,24 +69,21 @@ class TrainModel(object):
         loss = 0
         for i_episode in range(num_episodes):
             print(f"Episode:{i_episode}")
-            concept_space_episode_id = self.concept_space.add_data('Episode')
+            #clear wm before new Episode
+            self.wm.concept_space.clear_wm()
+            concept_space_episode_id = self.wm.concept_space.add_data('Episode')
             episode_id = concept_space_episode_id['elementId(n)'][0]
-            self.concept_space.close()
+            self.wm.concept_space.close()
             episode_memory = []
             # Initialize the environment and state
             obs = self.env.reset()
-            #state = self.process_frames(obs)
             rew_ep = 0
             loss_ep = 0
             losses = []
             timestep = 0
             aff_id = None
             state_id = None
-            # current_screen, encoded_state = self.object_extractor.extract_objects(obs)
             encoded_inventory, objects_interacting_frames = self.action_embedder.get_inventory_embeddings(self.env.inventory, self.object_extractor)
-            # state_id = self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep)
-            # aff_id_int = self.wm.add_object_action_repr(objects_interacting_frames, state_id, 0,
-            #                                             [0, 0], timestep, 0)
             current_screen, encoded_state_t, state_id, action_tool_ids = self.get_current_state_graph(
                 obs, objects_interacting_frames,
                 episode_id, timestep
@@ -93,10 +91,7 @@ class TrainModel(object):
             for t in count():
                 # Select and perform an action
                 output_tensor = torch.cat((current_screen, encoded_inventory.unsqueeze(0).unsqueeze(0)), dim=2)
-                if not self.use_actions_repr:
-                    action, steps_done, mask, inventory = self.select_action(current_screen, params, policy_net, len(self.env.allowed_actions), steps_done)
-                else:
-                    action, steps_done, mask, inventory = self.select_action(output_tensor, params, policy_net, len(self.env.allowed_actions), steps_done)
+                action, steps_done, mask, inventory = self.select_action(output_tensor, params, policy_net, len(self.env.allowed_actions), steps_done)
 
                 returned_state, reward, done, _ = self.env.step(action[0])
                 inventory_item_applied = self.env.inventory.item(action[0][0])

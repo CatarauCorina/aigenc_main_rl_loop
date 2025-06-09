@@ -13,16 +13,16 @@ import re
 
 def get_render_mode(args):
     mode = 'rgb_array'
-    if args.render_high_res:
-        mode += '_high'
-    if args.render_text:
-        mode += '_text'
-    if args.render_ball_traces:
-        mode += '_ball_trace'
-    if args.render_changed_colors:
-        mode += '_changed_colors'
-    if args.render_mega_res:
-        mode += '_mega'
+    # if args.render_high_res:
+    #     mode += '_high'
+    # if args.render_text:
+    #     mode += '_text'
+    # if args.render_ball_traces:
+    #     mode += '_ball_trace'
+    # if args.render_changed_colors:
+    #     mode += '_changed_colors'
+    # if args.render_mega_res:
+    #     mode += '_mega'
     return mode
 
 

@@ -34,7 +34,7 @@ class SegmentAnythingObjectExtractor(object):
             points_per_side=32,
             pred_iou_thresh=0.86,
             stability_score_thresh=0.97,
-            crop_n_layers=1,
+            crop_n_layers=0,
             crop_n_points_downscale_factor=2,
             min_mask_region_area=100,  # Requires open-cv to run post-processin
         )
@@ -49,10 +49,17 @@ class SegmentAnythingObjectExtractor(object):
         self.resnet_encoder = torch.nn.Sequential(*list(resnet.children())[:-1])
         self.resnet_encoder = self.resnet_encoder.to(device).eval()
 
-        self.resnet_transform = transforms.Compose([
+        self.resnet_transform_frame = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Resize(256),
             transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        self.resnet_transform = transforms.Compose([
+            transforms.Resize(128),
+            transforms.CenterCrop(112),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
@@ -69,36 +76,60 @@ class SegmentAnythingObjectExtractor(object):
         reduced_features = self.linear_layer_resnet(reduced_features.view(-1, 2048))
         return reduced_features
 
-    def extract_objects(self, frame, use_model='resnet'):
+    def zoom_in(self, mask_inverted, masked):
+        nonzero_pixels = np.argwhere(mask_inverted == 0)
+        min_y, min_x = np.min(nonzero_pixels, axis=0)
+        max_y, max_x = np.max(nonzero_pixels, axis=0)
+
+        # Extract region of interest (ROI) from the original image using PIL
+        pil_image = Image.fromarray(masked)
+        roi = pil_image.crop((min_x - 5, min_y - 5, max_x + 5, max_y + 5))
+
+        # Resize or crop the ROI to zoom in
+        new_width, new_height = 64, 64  # Adjust as needed
+        zoomed_in_roi = roi.resize((new_width, new_height))
+
+        return zoomed_in_roi
+
+    def extract_objects(self, frame, use_model='resnet', count_obj=None):
         objects = []
         objects_resnet = []
+        objects_images = []
 
         #frame_reduced = self.pil_transform(frame).permute(1, 2, 0).detach().numpy()
         frame_reduced = cv2.resize(frame, dsize=(self.im_height, self.im_width), interpolation=cv2.INTER_CUBIC)
         with torch.no_grad():
-            masks = self.mask_generator.generate(frame_reduced)
-        masks = masks[:self.no_objects]
+            masks = self.mask_generator.generate(frame)
+        if count_obj is None:
+            masks = masks[:self.no_objects]
+            no_obj = self.no_objects
+        else:
+            masks = masks[:count_obj]
+            no_obj = count_obj
         for mask in masks:
             mask_inverted = np.invert(mask['segmentation']).astype(int)
             mask_arr = np.stack((mask_inverted,) * 3, axis=-1)
-            masked = np.where(mask_arr == 0, frame_reduced, 0)
+            masked = np.where(mask_arr == 0, frame, 0)
+            zoomed_in = self.zoom_in(mask_inverted, masked)
+
+            objects_images.append(zoomed_in)
             if use_model == 'resnet':
-                tensor = self.resnet_transform(masked).float()
+                tensor = self.resnet_transform(zoomed_in).float()
             objects.append(tensor)
 
         obj_tensor = torch.stack(objects).to(device)
         if use_model == 'resnet':
             with torch.no_grad():
                 reduced_features = self.pass_through_resnet(obj_tensor)
-                tensor_img_reduced = self.resnet_transform(frame_reduced).float().to(device)
+                tensor_img_reduced = self.resnet_transform_frame(frame_reduced).float().to(device)
                 encoded_state = self.pass_through_resnet(tensor_img_reduced.unsqueeze(0))
 
         encoded_objs = reduced_features
 
         if len(masks) < self.no_objects:
-            encoded_objs = F.pad(input=encoded_objs, pad=(0, 0, self.no_objects-len(masks), 0), mode='constant', value=0)
+            encoded_objs = F.pad(input=encoded_objs, pad=(0, 0, no_obj-len(masks), 0), mode='constant', value=0)
 
-        return encoded_objs.unsqueeze(0).unsqueeze(0).to(device), encoded_state
+        return encoded_objs.unsqueeze(0).unsqueeze(0).to(device), encoded_state, objects_images
 
     def find_objects_positions(self, frame):
         objects_positions = []

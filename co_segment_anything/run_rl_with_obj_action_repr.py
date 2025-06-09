@@ -1,4 +1,6 @@
 import random
+
+import matplotlib.pyplot as plt
 import wandb
 import gym
 import sys
@@ -43,15 +45,19 @@ class TrainModel(object):
         self.masked= masked
 
         self.object_extractor = SegmentAnythingObjectExtractor()
-        self.action_embedder = ActionObservation()
-        self.concept_space = ConceptSpaceGDS(memory_type="afftest")
-        self.wm = WorkingMemory(which_db='afftest')
-        self.use_actions_repr = True
+
+        self.concept_space = ConceptSpaceGDS(memory_type="outcomesmall")
+        self.action_embedder = ActionObservation(concept_space=self.concept_space)
+        self.wm = WorkingMemory(which_db='outcomesmall')
+        self.use_actions_repr = False
 
     def get_current_state_graph(self, observation, objects_interacting_frames,  episode_id, timestep):
-        current_screen_objects, encoded_state = self.object_extractor.extract_objects(observation)
-        state_id = self.wm.add_to_memory(encoded_state, current_screen_objects, episode_id, timestep)
-        action_tool_ids = self.wm.add_object_action_repr(objects_interacting_frames, state_id)
+        current_screen_objects, encoded_state, obj_imgs = self.object_extractor.extract_objects(observation)
+        # for img in obj_imgs:
+        #     plt.imshow(img)
+        #     plt.show()
+        state_id,_ = self.wm.add_to_memory(encoded_state, current_screen_objects, episode_id, timestep, imgs=obj_imgs)
+        action_tool_ids, _ = self.wm.add_object_action_repr(objects_interacting_frames, state_id)
         return current_screen_objects, encoded_state, state_id, action_tool_ids
 
     def compute_effect(self, st, st_plus_1, reward):
@@ -82,7 +88,7 @@ class TrainModel(object):
             aff_id = None
             state_id = None
             # current_screen, encoded_state = self.object_extractor.extract_objects(obs)
-            encoded_inventory, objects_interacting_frames = self.action_embedder.get_inventory_embeddings(self.env.inventory, self.object_extractor)
+            encoded_inventory, objects_interacting_frames = self.action_embedder.get_inventory_embeddings(self.env.inventory, self.object_extractor, wm=self.wm)
             # state_id = self.wm.add_to_memory(encoded_state, current_screen, episode_id, timestep)
             # aff_id_int = self.wm.add_object_action_repr(objects_interacting_frames, state_id, 0,
             #                                             [0, 0], timestep, 0)
@@ -92,10 +98,11 @@ class TrainModel(object):
             )
             for t in count():
                 # Select and perform an action
-                output_tensor = torch.cat((current_screen, encoded_inventory.unsqueeze(0).unsqueeze(0)), dim=2)
+
                 if not self.use_actions_repr:
                     action, steps_done, mask, inventory = self.select_action(current_screen, params, policy_net, len(self.env.allowed_actions), steps_done)
                 else:
+                    output_tensor = torch.cat((current_screen, encoded_inventory.unsqueeze(0).unsqueeze(0)), dim=2)
                     action, steps_done, mask, inventory = self.select_action(output_tensor, params, policy_net, len(self.env.allowed_actions), steps_done)
 
                 returned_state, reward, done, _ = self.env.step(action[0])
@@ -210,7 +217,7 @@ class TrainModel(object):
 
     def init_model(self, actions=0, checkpoint_file=""):
         obs = self.env.reset()
-        init_screen, state_enc = self.object_extractor.extract_objects(obs)
+        init_screen, state_enc, _ = self.object_extractor.extract_objects(obs)
         # init_screen = self.process_frames(obs)
         # _, _, screen_height, screen_width = init_screen.shape
         if actions == 0:
@@ -417,6 +424,7 @@ def main():
     settings = CreateGameSettings(
         evaluation_mode=True,
         max_num_steps=30,
+        action_set_size=7,
         render_mega_res=False,
         render_ball_traces=False)
     env.set_settings(settings)
@@ -424,7 +432,7 @@ def main():
     done = False
     frames = []
 
-    wandb_logger = Logger(f"6_obj{checkpoint_file}samobjects_dqn_create", project='memory_testing')
+    wandb_logger = Logger(f"zoom_6_obj{checkpoint_file}samobjects_dqn_create", project='new_memory_testing')
     logger = wandb_logger.get_logger()
     trainer = TrainModel(DQN,
                          env, (True, 1000),

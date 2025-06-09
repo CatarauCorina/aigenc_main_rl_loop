@@ -28,11 +28,12 @@ class inter_att(nn.Module):
             beta.append(attn_curr.matmul(sp.t()))
         beta = torch.cat(beta, dim=-1).view(-1)
         beta = self.softmax(beta)
-        print("sc ", beta.data.cpu().numpy())  # type-level attention
+        type_lvl_att = beta.data.cpu().numpy()
+        # print("sc ", beta.data.cpu().numpy())  # type-level attention
         z_mc = 0
         for i in range(len(embeds)):
             z_mc += embeds[i] * beta[i]
-        return z_mc
+        return z_mc, type_lvl_att
 
 
 class intra_att(nn.Module):
@@ -48,16 +49,42 @@ class intra_att(nn.Module):
         self.softmax = nn.Softmax(dim=1)
         self.leakyrelu = nn.LeakyReLU()
 
+
+
+    # def forward(self, nei, h, h_refer):
+    #     #nei_emb = F.embedding(nei, h)
+    #     if len(h.shape) == 1:
+    #         h = h.unsqueeze(0)
+    #     nei_emb = h.unsqueeze(0)
+    #     h_refer = torch.unsqueeze(h_refer, 1)
+    #     h_refer = h_refer.expand_as(nei_emb)
+    #     all_emb = torch.cat([h_refer, nei_emb], dim=-1)
+    #     attn_curr = self.attn_drop(self.att)
+    #     att = self.leakyrelu(all_emb.matmul(attn_curr.t()))
+    #     att = self.softmax(att)
+    #     # print(att)
+    #     nei_emb = (att*nei_emb).sum(dim=1)
+    #     return nei_emb, att
+
     def forward(self, nei, h, h_refer):
-        nei_emb = F.embedding(nei, h)
-        h_refer = torch.unsqueeze(h_refer, 1)
-        h_refer = h_refer.expand_as(nei_emb)
-        all_emb = torch.cat([h_refer, nei_emb], dim=-1)
+        # Embed the neighbors
+        # nei_emb = F.embedding(nei, h)
+        nei_emb = h.unsqueeze(0)
+
+        # Use the learnable h_refer directly, expanding its dimensions to match nei_emb
+        h_refer_expanded = h_refer.unsqueeze(0).expand_as(nei_emb)
+
+        # Concatenate the reference embedding with neighbor embeddings
+        all_emb = torch.cat([h_refer_expanded, nei_emb], dim=-1)
+
+        # Apply attention mechanism
         attn_curr = self.attn_drop(self.att)
         att = self.leakyrelu(all_emb.matmul(attn_curr.t()))
         att = self.softmax(att)
-        nei_emb = (att*nei_emb).sum(dim=1)
-        return nei_emb
+
+        # Compute the weighted sum of neighbor embeddings
+        nei_emb = (att * nei_emb).sum(dim=1)
+        return nei_emb, att
 
 
 class Sc_encoder(nn.Module):
@@ -67,22 +94,28 @@ class Sc_encoder(nn.Module):
         self.inter = inter_att(hidden_dim, attn_drop)
         self.sample_rate = sample_rate
         self.nei_num = nei_num
+        self.h_refer = nn.Parameter(torch.empty(size=(hidden_dim,)), requires_grad=True)
+        torch.nn.init.xavier_uniform_(self.h_refer.unsqueeze(0))
+
 
     def forward(self, nei_h, nei_index):
         embeds = []
+        all_intra_att = []
         for i in range(self.nei_num):
             sele_nei = []
             sample_num = self.sample_rate[i]
-            for per_node_nei in nei_index[i]:
-                if len(per_node_nei) >= sample_num:
-                    select_one = torch.tensor(np.random.choice(per_node_nei, sample_num,
-                                                               replace=False))[np.newaxis]
-                else:
-                    select_one = torch.tensor(np.random.choice(per_node_nei, sample_num,
-                                                               replace=True))[np.newaxis]
-                sele_nei.append(select_one)
-            sele_nei = torch.cat(sele_nei, dim=0).cuda()
-            one_type_emb = F.elu(self.intra[i](sele_nei, nei_h[i + 1], nei_h[0]))
+            # for per_node_nei in nei_index[i]:
+            #     if len(per_node_nei) >= sample_num:
+            #         select_one = torch.tensor(np.random.choice(per_node_nei, sample_num,
+            #                                                    replace=False))[np.newaxis]
+            #     else:
+            #         select_one = torch.tensor(np.random.choice(per_node_nei, sample_num,
+            #                                                    replace=True))[np.newaxis]
+            #     sele_nei.append(select_one)
+            # sele_nei = torch.cat(sele_nei, dim=0).cuda()
+            intra_att_emb, att = self.intra[i](nei_index[i], nei_h[i], self.h_refer)
+            one_type_emb = F.elu(intra_att_emb)
+            all_intra_att.append(att)
             embeds.append(one_type_emb)
-        z_mc = self.inter(embeds)
-        return z_mc
+        z_mc, type_lvl_att = self.inter(embeds)
+        return z_mc, all_intra_att, type_lvl_att

@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from baseline_models.logger import Logger
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # command line args
 parser = argparse.ArgumentParser(description='Neural Statistician Aff Experiment')
@@ -103,27 +104,69 @@ class ActionEmbedder:
         context_latent, obj_instance, recon_img = self.model(data)
         return context_latent, obj_instance, recon_img
 
-    def add_action_to_concept_space(self, context, otype):
-        aff_context = self.concept_space.add_data('ActionRepr')
-        aff_id = aff_context['elementId(n)'][0]
-        self.concept_space.set_property(aff_id, 'ActionRepr', 'val', context.squeeze(0).tolist())
-        self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
+    def add_action_to_concept_space(self, context, otype, obj_id_type, wm=None):
+        act_repr_exists = self.check_if_node_exists(context.tolist()[0], wm.gds, otype, 0.55)
+
+        if len(act_repr_exists) > 0 and act_repr_exists['no.obj_types'][0] is not None:
+            aff_id = act_repr_exists['elementId(no)'][0]
+            # types = concept_space.get_property('ActionRepr', aff_id, 'obj_types')
+            updated_types = act_repr_exists['no.obj_types'][0] + [otype]
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_types', updated_types)
+        else:
+            aff_context = self.concept_space.add_data('ActionRepr')
+            aff_id = aff_context['elementId(n)'][0]
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'value', context.tolist()[0])
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_id_type', f'"{obj_id_type}"')
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'obj_types', [])
+            self.concept_space.set_property(aff_id, 'ActionRepr', 'parent_id_state', [])
+
+
+
         return aff_id
+
+    def check_if_node_exists(self, embedding, gds, obj_type=None, similarity_th=0.5, similarity_method='euclidean', node_type='ActionRepr'):
+        if obj_type is not None:
+            similar_objects = gds.run_cypher(
+            f"""
+                match(no:{node_type}) where no.obj_type="{obj_type}" with 
+                    no, gds.similarity.{similarity_method}(
+                        {embedding},
+                        no.value
+                    ) as sim
+                where sim > {similarity_th}
+                return elementId(no),no.obj_type, no.obj_id_type, no.obj_types, sim order by sim desc limit 6
+            """
+            )
+        else:
+            similar_objects = gds.run_cypher(
+                f"""
+                            match(no:{node_type}) with 
+                                no, gds.similarity.{similarity_method}(
+                                    {embedding},
+                                    no.value
+                                ) as sim
+                            where sim > {similarity_th}
+                            return elementId(no),no.obj_type, no.obj_id_type, no.obj_types, sim order by sim desc limit 6
+                        """
+            )
+        return similar_objects
 
 
 
 def get_aff_emb_context_and_instance(model, optimizer, object_type, datasets):
     cwd = os.getcwd()
-    path = os.path.join(cwd, 'checkpoints_ns_aff/checkpoints/ns_78.ckp')
+    path = os.path.join(cwd, 'checkpoints_ns_aff/checkpoints/ns_new_30.ckp')
     checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model_state'])
     optimizer.load_state_dict(checkpoint['optimizer_state'])
     model.eval()
+    data, obj_id_type = datasets.get_object_by_type(object_type)
 
-    data = datasets.get_object_by_type(object_type).unsqueeze(0)
+    data= data.unsqueeze(0)
 
     context_latent, obj_instance, recon_img = model(data)
-    return context_latent, obj_instance, recon_img
+    return context_latent, obj_instance, recon_img, obj_id_type
 
 
 def compute_dist_within_ds(v):
@@ -140,10 +183,91 @@ def compute_dist_diff_ds(v1, v2):
     return pdist(v1, v2)
 
 
+
+def check_if_node_exists(embedding, gds, similarity_th=0.5, similarity_method='euclidean', node_type='ActionRepr'):
+        similar_objects = gds.run_cypher(
+            f"""
+                match(no:{node_type}) with 
+                    no, gds.similarity.{similarity_method}(
+                        {embedding},
+                        no.value
+                    ) as sim
+                where sim > {similarity_th}
+                return elementId(no),no.obj_type, no.obj_id_type, sim order by sim desc limit 6
+            """
+        )
+        return similar_objects
+
+
+def check_if_node_exists_update(embedding, gds, similarity_th=0.5):
+    act_reprs = get_all_act_repr(gds)
+    if len(act_reprs) == 0:
+        return None
+    val = torch.Tensor(list(act_reprs['val'])).to(device)
+
+    normalized_tensor = F.normalize(embedding.unsqueeze(0), p=2, dim=1)
+    val = F.normalize(val, p=2, dim=1)
+
+    # Step 2: Compute pairwise Euclidean distances
+    distances = torch.cdist(normalized_tensor, val).squeeze(0)
+    print(distances)
+
+    distances_normalized = distances / distances.max()
+    pairs = torch.nonzero(distances_normalized > similarity_th, as_tuple=True)
+    distances_below_threshold = distances_normalized[pairs]
+    if len(pairs) > 0 and  val.shape[0] == 1:
+        return act_reprs['elementId(n)'][0]
+    result = list(zip(pairs[0].tolist(), pairs[1].tolist(), distances_below_threshold.tolist()))
+    if len(result) > 0:
+        index = result[0][1]
+        id_same_act = act_reprs['elementId(n)'][index]
+        return id_same_act
+    return None
+
+def check_if_node_exists_cosine(tensor1, tensor2):
+    tensor1 = tensor1.flatten()
+    tensor2 = tensor2.flatten()
+    return F.cosine_similarity(tensor1.unsqueeze(0), tensor2.unsqueeze(0)).item()
+
+def check_node_exists(embedding, gds, similarity_th=0.5):
+    act_reprs = get_all_act_repr(gds)
+    if len(act_reprs) == 0:
+        return None
+    val = torch.Tensor(list(act_reprs['value'])).to(device)
+    similarities = [check_if_node_exists_cosine(embedding, t) for t in val]
+    sim_highest = similarities.index(max(similarities))
+    if max(similarities) > similarity_th:
+        id_same_act = act_reprs['elementId(n)'][sim_highest]
+        return id_same_act
+
+
+
+def get_act_repr(gds):
+        centroids = gds.run_cypher(
+            """
+                MATCH (n:ActionRepr) where n.obj_type='Ramp'
+                return n.value as value, n.context as context, n.obj_type, n.obj_id_type
+            """
+        )
+        return centroids
+
+
+def get_all_act_repr(gds):
+    centroids = gds.run_cypher(
+        """
+            MATCH (n:ActionRepr) 
+            return elementId(n), n.value as value
+        """
+    )
+    return centroids
+
+
+
+
 def add_test_data():
     # create datasets
-    wm = WorkingMemory(which_db="afftest")
-    concept_space = ConceptSpaceGDS(memory_type="afftest")
+    wm = WorkingMemory(which_db="afftestnew")
+    concept_space = ConceptSpaceGDS(memory_type="afftestnew")
 
     train_dataset = AffDataset(data_dir=args.data_dir, split='train',
                                             n_frames_per_set=5)
@@ -170,24 +294,44 @@ def add_test_data():
     model = Statistician(**model_kwargs)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    variation_nr = 1
-    ds_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "create_aff_ds\\train")
-    object_types = os.listdir(ds_path)
+    variation_nr = 5
+    # ds_path = os.path.join(os.path.dirname(os.path.dirname(os.getcwd())), "create_aff_ds\\train")
+    ds_path_new = os.path.join(os.path.dirname(os.getcwd()), "create_aff_ds\\objects_obs_grouped")
+
+    object_types = os.listdir(ds_path_new)
     contexts = {}
     for otype in object_types:
         #contexts[otype] = {'list': [], 'dist': None}
         for i in range(variation_nr):
-            context, inst, img = get_aff_emb_context_and_instance(model, optimizer, otype, datasets)
+            context, inst, img, obj_id_type = get_aff_emb_context_and_instance(model, optimizer, otype, datasets)
+            for ins in inst:
+                # act_repr_exists = check_node_exists(ins,wm.gds,0.6)
+                # if act_repr_exists is not None:
+                #     aff_id = act_repr_exists
+                #     types = concept_space.get_property('ActionRepr', aff_id, 'obj_types')
+                #     updated_types = types[0]['n.obj_types'] + [otype]
+                #     concept_space.set_property(aff_id, 'ActionRepr', 'obj_types',updated_types)
+                # else:
+                aff_context = concept_space.add_data('ActionRepr')
+                aff_id = aff_context['elementId(n)'][0]
+                concept_space.set_property(aff_id, 'ActionRepr', 'value', ins.tolist())
+                concept_space.set_property(aff_id, 'ActionRepr', 'context', context.tolist()[0])
+                concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
+                concept_space.set_property(aff_id, 'ActionRepr', 'obj_id_type', f'"{obj_id_type}"')
+                concept_space.set_property(aff_id, 'ActionRepr', 'obj_types',[])
+
+
+
             # recog_img = img.cpu().squeeze(0)
             # for img in recog_img:
             #     img_plot = torchvision.transforms.functional.to_pil_image(img)
             #     import matplotlib.pyplot as plt
             #     plt.imshow(img_plot)
             #     plt.show()
-            aff_context = concept_space.add_data('ActionRepr')
-            aff_id = aff_context['elementId(n)'][0]
-            concept_space.set_property(aff_id, 'ActionRepr', 'val', inst[3].tolist())
-            concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
+            # aff_context = concept_space.add_data('ActionRepr')
+            # aff_id = aff_context['elementId(n)'][0]
+            # concept_space.set_property(aff_id, 'ActionRepr', 'val', inst[3].tolist())
+            # concept_space.set_property(aff_id, 'ActionRepr', 'obj_type', f'"{otype}"')
 
 
 
@@ -195,8 +339,16 @@ def add_test_data():
 
 def view_stats_of_data():
     add_test_data()
-    # wm = WorkingMemory(which_db="afftest")
-    # name = wm.create_query_graph('afftest', 'ActionRepr', ['val'])
+    # wm = WorkingMemory(which_db="afftestnew")
+    # ramp_repr = get_act_repr(wm.gds)
+    # val_tens = torch.Tensor(list(ramp_repr['val']))
+    # context_tens = torch.Tensor(list(ramp_repr['context']))
+    #
+    # check_if_node_exists_update(torch.Tensor(list(ramp_repr['val'])[0]), wm.gds)
+
+
+    # check_if_node_exists(ramp_repr['val'][0],wm.gds)
+    # name = wm.create_query_graph('afftestnew2', 'ActionRepr', ['val, context'])
     # clusters = wm.compute_action_clusters(f'"{name}"')
     # return clusters
 

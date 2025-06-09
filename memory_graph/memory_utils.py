@@ -1,16 +1,62 @@
 import os
+import io
 import torch
+import cv2
+import io
+from PIL import Image
 from graphdatascience import GraphDataScience
 import uuid
 import numpy as np
 import pandas as pd
+from neo4j import GraphDatabase
+import networkx as nx
+import matplotlib.pyplot as plt
+import boto3
 from memory_graph.gds_concept_space import ConceptSpaceGDS
+
+
+class AWSUtils:
+
+    def __init__(self, store_in_db=False):
+        self.bucket_name = 'aigenc'
+        aws_access_key_id = os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret_access_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        # Set up the AWS session using the credentials
+        session = boto3.Session(
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+        )
+        # Create an S3 client using the session
+        self.s3 = session.client('s3')
+
+    def add_data(self, obj_id, image_array):
+        try:
+            # Save the image locally
+            local_temp_path = 'temp_image.jpg'
+            with io.BytesIO() as buffer:
+                image_array.save(buffer, format="JPEG")
+                buffer.seek(0)
+
+                # Upload the file
+                self.s3.upload_fileobj(buffer, self.bucket_name, f"{obj_id}.jpeg")
+
+            print("Upload Successful")
+            return True
+        except FileNotFoundError:
+            print("The file was not found")
+            return False
+
+    def get_data(self, obj_id):
+        response = self.s3.get_object(Bucket=self.bucket_name, Key=f'{obj_id}.jpeg')
+        content = response['Body'].read()
+        image_pil = Image.open(io.BytesIO(content))
+        return image_pil
 
 
 class WorkingMemory:
     DATABASE_URL = os.environ["NEO4J_BOLT_URL"]
     NEO_USER = os.environ['NEO_USER']
-    NEO_PASS = os.environ['NEO_PASS']
+    NEO_PASS = 'minigrid123'
 
     def __init__(self, default_name='objectConcept', which_db="wmtest"):
         self.gds = GraphDataScience(self.DATABASE_URL, auth=(self.NEO_USER, self.NEO_PASS))
@@ -19,6 +65,7 @@ class WorkingMemory:
         self.gds.set_database(which_db)
         self.default_name = default_name
         self.concept_space = ConceptSpaceGDS(memory_type=which_db)
+        self.aws_utils = AWSUtils()
         return
 
     def gds_init_project_catalog_objects(self):
@@ -75,8 +122,7 @@ class WorkingMemory:
         """)
         return name_exists['name_exists'][0]
 
-    def create_state_graph(self):
-        return
+
 
     def compute_effect(self):
         return
@@ -168,7 +214,9 @@ class WorkingMemory:
         )
         return centroids
 
-    def check_if_node_exists(self, embedding, similarity_th=0.5, similarity_method='euclidean', node_type='ObjectConcept'):
+
+
+    def check_if_node_exists(self, embedding, similarity_th=0.5, similarity_method='cosine', node_type='ObjectConcept'):
         similar_objects = self.gds.run_cypher(
             f"""
                 match(no:{node_type}) with 
@@ -191,28 +239,52 @@ class WorkingMemory:
         )
         return add
 
-    def add_to_memory(self, encoded_state, current_screen, episode_id, timestep):
+
+    def save_objs_visually(self, image_pil, obj_id):
+        # image_pil = Image.fromarray(obj_img)
+        dir = os.getcwd()
+        ep_dir = os.path.join(dir, 'objects')
+        ep_dir = os.path.join(ep_dir, f"{obj_id.split(':')[2]}")
+        if not os.path.exists(ep_dir):
+            os.makedirs(ep_dir)
+        file_name = f'obj_{obj_id.split(":")[2]}.png'
+        file_path = os.path.join(ep_dir, file_name)
+
+        image_pil.save(file_path)
+        return
+
+    def add_to_memory(self, encoded_state, current_screen, episode_id, timestep, masks=None, imgs=None):
         self.init_project_catalogs(init_action=False)
         state_id = self.concept_space.add_state_with_objects(
             encoded_state,
             episode_id,
             timestep,
         )
+        added_objs = []
         state_split = int(state_id.split(':')[2])
         print(state_split)
+        count = 0
         for obj in current_screen.squeeze(0).squeeze(0):
+            if masks is not None:
+                mask = masks[count]
+            else:
+                mask = None
             if torch.count_nonzero(obj).item() != 0:
                 obj_list = obj.tolist()
-                self.check_object_exists_and_add(obj_list, state_id)
+                obj_id = self.check_object_exists_and_add(obj_list, state_id, mask)
+                added_objs.append(obj_id)
+                # if len(imgs) > count:
+                #     self.save_objs_visually(imgs[count], obj_id)
+            count+=1
         self.concept_space.close()
-        return state_id
+        return state_id, added_objs
 
     def init_project_catalogs(self, init_action=False):
         try:
             project_name_obj = self.gds_init_project_catalog_objects()
         except:
             obj = self.concept_space.add_data('ObjectConcept')
-            random_value = list(np.random.uniform(low=0.1, high=1, size=(16,)))
+            random_value = list(np.random.uniform(low=0.1, high=1, size=(512,)))
             self.concept_space.update_node_by_id(obj['elementId(n)'][0], random_value)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'alpha', 0.1)
@@ -239,14 +311,15 @@ class WorkingMemory:
                 obj_id = self.check_object_exists_and_add(obj_list, state_split)
         self.concept_space.close()
 
-    def check_object_exists_and_add(self, obj_list, state_split):
+    def check_object_exists_and_add(self, obj_list, state_split, mask=None):
         state_id = int(state_split.split(':')[2])
-        similar_objects = self.check_if_node_exists(obj_list, similarity_th=0.8)
+        similar_objects = self.check_if_node_exists(obj_list, similarity_th=0.86)
         if not similar_objects.empty:
             state_ids_list = list(similar_objects['no.parent_id_state'][0]) + [state_id]
             self.concept_space.set_property(similar_objects['elementId(no)'][0], 'ObjectConcept', 'parent_id_state',
                                             f'apoc.coll.toSet({state_ids_list})')
             obj_id = similar_objects['elementId(no)'][0]
+
         else:
             obj = self.concept_space.add_data('ObjectConcept')
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'parent_id_state',
@@ -256,11 +329,15 @@ class WorkingMemory:
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'att', 0.01)
             self.concept_space.set_property(obj['elementId(n)'][0], 'ObjectConcept', 'alpha', 0.1)
             obj_id = obj['elementId(n)'][0]
+            if mask is not None:
+                self.aws_utils.add_data(obj_id, mask)
+
         self.concept_space.match_state_add_node(state_split, obj_id)
         return obj_id
 
     def check_action_repr_exists_and_add(self, action_repr, state_id, otype):
-        similar_action_repr = self.check_if_node_exists(action_repr, node_type='ActionRepr', similarity_th=0.6)
+        similar_action_repr = self.check_if_node_exists(action_repr, similarity_method='euclidean', node_type='ActionRepr', similarity_th=0.6)
+
         if not similar_action_repr.empty:
             state_ids_list = list(similar_action_repr['no.parent_id_state'][0]) + [state_id]
             self.concept_space.set_property(similar_action_repr['elementId(no)'][0], 'ActionRepr', 'parent_id_state',
@@ -285,23 +362,29 @@ class WorkingMemory:
 
         state_split = int(state_id.split(':')[2])
         print(state_split)
+        added_objs = []
         action_ids = []
         for interaction in dict_interactions:
             objects = interaction['objects_in_interaction']
+            objects_imgs = interaction['objects_in_interaction_img']
             action_repr = interaction['interaction']
             action_id = self.check_action_repr_exists_and_add(action_repr.squeeze(0).tolist(),
                                                               state_split, interaction['tool_label'])
             action_ids_tool_ids[interaction['tool_id']] = action_id
-
+            count = 0
             for obj in objects.squeeze(0).squeeze(0):
                 if torch.count_nonzero(obj).item() != 0:
                     obj_list = obj.tolist()
-                    obj_id = self.check_object_exists_and_add(obj_list, state_id)
+                    img = objects_imgs[count]
+                    obj_id = self.check_object_exists_and_add(obj_list, state_id, img)
                     self.concept_space.match_obj_add_action(obj_id, action_id)
+                    # self.save_objs_visually(img, obj_id)
                     action_ids.append(action_id)
+                    added_objs.append(obj_id)
+                    count +=1
 
         self.concept_space.close()
-        return action_ids_tool_ids
+        return action_ids_tool_ids, added_objs
 
     def match_action_affordance(self, action_tool_ids, applied_item, position, reward, time):
         aff_id = None
@@ -360,12 +443,27 @@ class WorkingMemory:
         self.concept_space.update_objects_attention(dict_values_to_update)
         return
 
+    def get_state_graph_networkxx(self, state_id):
+        nodes, rels = self.concept_space.get_state_graph(state_id)
+        G = nx.MultiDiGraph()
+        for node in nodes:
+            G.add_node(node.id, labels=node._labels, properties=node._properties)
 
+        for rel in rels:
+            G.add_edge(rel.start_node.id, rel.end_node.id, key=rel.id, type=rel.type, properties=rel._properties)
+
+        pos = nx.spring_layout(G) # Define node positions using the spring layout algorithm
+        nx.draw(G, pos, with_labels=True, node_size=200, node_color='skyblue', font_size=10, font_color='black',
+                font_weight='bold')
+        plt.title("NetworkX Graph")
+        plt.axis('off')  # Turn off axis labels
+        plt.show()
 
 
 
 if __name__ == "__main__":
-    cs_memory = WorkingMemory()
+    cs_memory = WorkingMemory(which_db="afftest")
+    cs_memory.get_state_graph_networkxx("4:c3295efd-cd8c-4d8a-8839-0d538258dc83:13")
     #clusters = cs_memory.compute_attention(2,"4:f668e156-00ed-4517-b866-5f67756e1d04:1538")
     res = cs_memory.concept_space.get_attention_for_episode()
     print(res)

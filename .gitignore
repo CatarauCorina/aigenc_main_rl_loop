@@ -11,13 +11,21 @@ __pycache__/
 *.exe
 *.x86_64
 *.x86
+*.png
 co_segment_anything/checkpoints/*
 affordance_learning/checkpoints_ns_aff/*
 affordance_learning/wandb/*
+hetgraph_gt_encoder/wandb/*
+hetgraph_gt_encoder/states_data/*
+hetgraph_gt_encoder/states_data_time/*
+hetgraph_gt_encoder/train_data_states/*
+hetgraph_gt_encoder/checkpoints/*
+create_aff_ds/*
 *.pt
 co_segment_anything/wandb/*
 
 __pycache__/
 *.pyc
+*.pickle
 *.vscode
 *.pytest_cache/
